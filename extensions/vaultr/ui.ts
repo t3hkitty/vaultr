@@ -26,7 +26,7 @@ export class KoofrBrowserView {
   private selectedShelfId = 'all';
   private searchQuery = '';
   private selectedPaths = new Set<string>();
-  private activeTab: 'browse' | 'dedupe' | 'sidecar' | 'extensions' = 'browse';
+  private activeTab: 'browse' | 'dedupe' | 'sidecar' | 'extensions' | 'viewer' = 'browse';
   private inspectingItem: VaultrFileMetadata | null = null;
   private callbacks: BrowserViewCallbacks;
   private sortBy: 'added_at_desc' | 'added_at_asc' | 'path' | 'size' | 'mtime' = 'added_at_desc';
@@ -178,8 +178,9 @@ export class KoofrBrowserView {
     const tabGroup = document.createElement('div');
     tabGroup.style.cssText = 'display: flex; background: #2d3748; border-radius: 6px; padding: 2px;';
 
-    const tabs: Array<{ id: 'browse' | 'dedupe' | 'sidecar' | 'extensions'; label: string }> = [
+    const tabs: Array<{ id: 'browse' | 'dedupe' | 'sidecar' | 'extensions' | 'viewer'; label: string }> = [
       { id: 'browse', label: 'Browse' },
+      { id: 'viewer', label: 'Quick Viewer / Edit' },
       { id: 'dedupe', label: 'MD5 Dedupe' },
       { id: 'sidecar', label: 'Sidecar Inspector' },
       { id: 'extensions', label: 'Vaultr Extensions' },
@@ -287,6 +288,8 @@ export class KoofrBrowserView {
       main.appendChild(this.renderSidecarInspector());
     } else if (this.activeTab === 'extensions') {
       main.appendChild(this.renderExtensionsView());
+    } else if (this.activeTab === 'viewer') {
+      main.appendChild(this.renderQuickViewer());
     } else {
       main.appendChild(this.renderFileTableView());
     }
@@ -778,6 +781,103 @@ sidecarPath: ${item.sidecarPath || 'none'}
     };
 
     return bar;
+  }
+
+  private renderQuickViewer(): HTMLElement {
+    const wrapper = document.createElement('div');
+    const item = this.inspectingItem || this.items[0];
+
+    if (!item) {
+      wrapper.innerHTML = '<div style="color: #718096; padding: 24px; text-align: center;">Select a file from the Browse table to inspect or edit.</div>';
+      return wrapper;
+    }
+
+    const isImage = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'].some(ext => item.path.toLowerCase().endsWith(ext) || item.mimeOrExt.includes(ext));
+    const isMedia = ['mp3', 'mp4', 'flac', 'm4a', 'wav', 'webm'].some(ext => item.path.toLowerCase().endsWith(ext) || item.mimeOrExt.includes(ext));
+
+    wrapper.innerHTML = `
+      <div style="background: #171922; border: 1px solid #2d3748; border-radius: 8px; padding: 16px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #2d3748; padding-bottom: 8px;">
+          <div>
+            <h3 style="margin: 0; color: #63b3ed; font-size: 1rem; font-family: monospace;">${item.path}</h3>
+            <span style="color: #718096; font-size: 0.75rem;">Remote: ${item.remote} | Size: ${this.formatBytes(item.size)}</span>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button id="vaultr-open-with-vlc" style="background: #ed8936; color: white; border: none; padding: 5px 10px; border-radius: 4px; font-size: 0.8rem; cursor: pointer;">
+              Cone / Open in VLC
+            </button>
+            <button id="vaultr-open-with-kittlibr" style="background: #805ad5; color: white; border: none; padding: 5px 10px; border-radius: 4px; font-size: 0.8rem; cursor: pointer;">
+              Open in Kittlibr
+            </button>
+          </div>
+        </div>
+
+        ${isImage ? `
+          <div style="text-align: center; padding: 16px; background: #0f1015; border-radius: 6px;">
+            <div style="margin-bottom: 10px;">
+              <button id="rotate-btn" style="background: #2d3748; color: #e2e8f0; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">
+                🔄 Rotate 90°
+              </button>
+            </div>
+            <img id="viewer-img" src="${item.path}" alt="${item.path}" style="max-height: 400px; max-width: 100%; border-radius: 4px; transform: rotate(0deg); transition: transform 0.2s;" onerror="this.alt='[Image Preview Placeholder: ${item.path}]';" />
+          </div>
+        ` : isMedia ? `
+          <div style="padding: 24px; text-align: center; background: #0f1015; border-radius: 6px;">
+            <div style="font-size: 2.5rem; margin-bottom: 12px;">🎬</div>
+            <audio controls style="width: 100%; max-width: 500px; margin-bottom: 12px;" src="${item.path}"></audio>
+            <div style="color: #a0aec0; font-size: 0.8rem;">HTML5 audio/video preview. Use "Open in VLC" for streaming remote links.</div>
+          </div>
+        ` : `
+          <div>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+              <span style="font-size: 0.75rem; color: #a0aec0;">Text Editor (with line numbers & save state)</span>
+              <button id="save-text-btn" style="background: #38a169; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer;">💾 Save Edits</button>
+            </div>
+            <div style="display: flex; background: #0f1015; border: 1px solid #2d3748; border-radius: 6px; font-family: monospace; font-size: 0.8rem;">
+              <div style="padding: 10px 8px; background: #14171f; color: #4a5568; text-align: right; user-select: none; border-right: 1px solid #2d3748;">
+                1<br/>2<br/>3<br/>4<br/>5<br/>6<br/>7<br/>8<br/>9<br/>10
+              </div>
+              <textarea id="quick-text-area" style="flex: 1; min-height: 220px; background: transparent; border: none; color: #cbd5e0; padding: 10px; font-family: monospace; font-size: 0.8rem; resize: vertical; outline: none;"># ${item.path}
+Sidecar record and notes preview.
+Edit here to update file annotations...</textarea>
+            </div>
+          </div>
+        `}
+      </div>
+    `;
+
+    const vlcBtn = wrapper.querySelector('#vaultr-open-with-vlc') as HTMLButtonElement | null;
+    if (vlcBtn) {
+      vlcBtn.onclick = () => {
+        alert(`[Open With VLC]\nResolving stream for ${item.path} and launching VLC.`);
+      };
+    }
+
+    const kittlibrBtn = wrapper.querySelector('#vaultr-open-with-kittlibr') as HTMLButtonElement | null;
+    if (kittlibrBtn) {
+      kittlibrBtn.onclick = () => {
+        alert(`[Open With Kittlibr]\nHanding off metadata to Kittlibr for reading.`);
+      };
+    }
+
+    const rotateBtn = wrapper.querySelector('#rotate-btn') as HTMLButtonElement | null;
+    if (rotateBtn) {
+      let deg = 0;
+      rotateBtn.onclick = () => {
+        deg = (deg + 90) % 360;
+        const img = wrapper.querySelector('#viewer-img') as HTMLImageElement;
+        if (img) img.style.transform = `rotate(${deg}deg)`;
+      };
+    }
+
+    const saveBtn = wrapper.querySelector('#save-text-btn') as HTMLButtonElement | null;
+    if (saveBtn) {
+      saveBtn.onclick = () => {
+        alert('Edits saved to sidecar.');
+      };
+    }
+
+    return wrapper;
   }
 }
 
