@@ -1,0 +1,184 @@
+From 91ba601e9872d7a3396800730c7296ed0bba9fc0 Mon Sep 17 00:00:00 2001
+From: t3hkitty <123781437+t3hkitty@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 19:46:31 +0000
+Subject: [PATCH 1/2] feat(daemon): add /api/sync/run endpoint, UTF-8 console
+ guard, and /api/capture telemetry route
+
+---
+ src/daemon/anymd_daemon.py | 153 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 153 insertions(+)
+
+diff --git a/src/daemon/anymd_daemon.py b/src/daemon/anymd_daemon.py
+index aa6cbcb..ceaa7e7 100644
+--- a/src/daemon/anymd_daemon.py
++++ b/src/daemon/anymd_daemon.py
+@@ -22,6 +22,12 @@ try:
+ except ImportError:
+     xxhash = None
+ 
++# Enforce UTF-8 console output to prevent Windows cp1252 charmap encode crashes
++if hasattr(sys.stdout, "reconfigure"):
++    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
++if hasattr(sys.stderr, "reconfigure"):
++    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
++
+ try:
+     import yaml
+     YAML_LOADER = getattr(yaml, 'CSafeLoader', yaml.SafeLoader)
+@@ -464,6 +470,153 @@ def rclone_scan_import(req: RcloneScanRequest):
+     }
+ 
+ 
++# ==============================================================================
++# OAuth & Vault Sync Status Endpoints (Google Cloud project: anymd-515619)
++# ==============================================================================
++
++@app.get("/api/auth/status")
++def get_auth_status():
++    """Returns status of unified Google OAuth token bundle (~/.config/anymd/google_oauth_token.json)."""
++    token_path = Path.home() / ".config" / "anymd" / "google_oauth_token.json"
++    if not token_path.exists():
++        return {
++            "authorized": False,
++            "message": "No active Google OAuth token bundle found. Run google_oauth_loopback.py --auth to capture credentials.",
++            "token_path": str(token_path)
++        }
++    try:
++        with open(token_path, "r", encoding="utf-8") as f:
++            data = json.load(f)
++        exp_remaining = int(data.get("expiry_timestamp", 0) - time.time())
++        return {
++            "authorized": True,
++            "client_id": data.get("client_id", "anymd-515619-desktop"),
++            "scopes": data.get("scope", data.get("requested_scopes", [])),
++            "expires_in_seconds": exp_remaining,
++            "has_refresh_token": bool(data.get("refresh_token")),
++            "updated_at": data.get("updated_at")
++        }
++    except Exception as e:
++        return {"authorized": False, "error": str(e)}
++
++
++@app.get("/api/sync/status")
++def get_sync_status():
++    """Returns status of the vaultr sync runner (~/.config/anymd/vaultr_sync_status.json)."""
++    status_path = Path.home() / ".config" / "anymd" / "vaultr_sync_status.json"
++    if not status_path.exists():
++        return {"status": "idle", "message": "No sync runs recorded yet"}
++    try:
++        with open(status_path, "r", encoding="utf-8") as f:
++            return json.load(f)
++    except Exception as e:
++        return {"status": "error", "error": str(e)}
++
++
++class RunSyncRequest(BaseModel):
++    direction: Optional[str] = "push" # 'push', 'pull', 'sync', 'bisync'
++    dry_run: Optional[bool] = False
++    remote: Optional[str] = None
++
++
++@app.post("/api/sync/run")
++def trigger_sync_endpoint(req: RunSyncRequest):
++    """
++    Button-triggered execution of vaultr_sync_runner.py.
++    Spawns headless rclone using the shared token bundle on Google Drive.
++    """
++    runner_candidates = [
++        Path.home() / "t3hkitty" / "vaultr" / "scripts" / "vaultr_sync_runner.py",
++        Path("C:/Scripts/vaultr_sync_runner.py"),
++        Path.home() / ".config" / "anymd" / "vaultr_sync_runner.py"
++    ]
++    runner_path = next((p for p in runner_candidates if p.exists()), None)
++    if not runner_path:
++        raise HTTPException(status_code=500, detail="vaultr_sync_runner.py not found on host filesystem.")
++
++    cmd = [sys.executable, str(runner_path), str(engine.vault_root), "--direction", req.direction]
++    if req.dry_run:
++        cmd.append("--dry-run")
++    if req.remote:
++        cmd.extend(["--remote", req.remote])
++
++    try:
++        res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
++        if res.returncode == 0:
++            return {
++                "success": True,
++                "message": "Vault sync completed successfully.",
++                "stdout": res.stdout.strip()
++            }
++        else:
++            raise HTTPException(
++                status_code=400,
++                detail=f"Vault sync failed: {res.stderr.strip() or res.stdout.strip()}"
++            )
++    except subprocess.TimeoutExpired:
++        raise HTTPException(status_code=504, detail="Vault sync timed out after 120 seconds.")
++    except Exception as e:
++        raise HTTPException(status_code=500, detail=str(e))
++
++
++class CaptureTelemetryRequest(BaseModel):
++    category: str = "fitness"  # 'fitness', 'location', 'somatic', 'contacts'
++    source: str = "kittlibr://capture"
++    metrics: Dict[str, Any]
++    notes: Optional[str] = None
++    tags: Optional[List[str]] = None
++
++
++@app.post("/api/capture")
++def capture_telemetry_endpoint(req: CaptureTelemetryRequest):
++    """
++    Ingests MBB/Somatic telemetry directly via local daemon or kittlibr://capture flow
++    and writes to meow-vault/telemetry without external webhooks.
++    """
++    now_iso = datetime.utcnow().isoformat() + "Z"
++    date_str = now_iso.split("T")[0]
++    zettel_id = engine.generate_zettelkasten_id()
++
++    vault_target = engine.vault_root / "telemetry" / req.category / f"{date_str}-{zettel_id}.md"
++    vault_target.parent.mkdir(parents=True, exist_ok=True)
++
++    meta = {
++        "id": f"mbb-{date_str}-{zettel_id}",
++        "zettelkasten_id": zettel_id,
++        "type": f"telemetry/{req.category}",
++        "source": req.source,
++        "recorded_at": now_iso,
++        "vault_zone": "meow-vault/telemetry",
++        "tags": ["mbb", "telemeowtrics", req.category] + (req.tags or []),
++        "metrics": req.metrics
++    }
++
++    body_lines = [
++        f"# Telemetry Log: {req.category.upper()} ({date_str})",
++        f"",
++        f"* **Source:** `{req.source}`",
++        f"* **Zettelkasten ID:** `{zettel_id}`",
++        f"",
++        f"## Metrics",
++        f"| Key | Value |",
++        f"| :--- | :--- |"
++    ]
++    for k, v in req.metrics.items():
++        body_lines.append(f"| **{k}** | `{v}` |")
++
++    if req.notes:
++        body_lines.extend(["", "## Notes", req.notes])
++
++    engine.atomic_write_yaml(vault_target, meta, "\n".join(body_lines))
++
++    return {
++        "success": True,
++        "id": meta["id"],
++        "written_to": str(vault_target),
++        "category": req.category
++    }
++
++
+ if __name__ == "__main__":
+     host = os.environ.get("ANYMD_HOST", "127.0.0.1")
+     port = int(os.environ.get("ANYMD_PORT", "3050"))
+-- 
+2.56.1
+

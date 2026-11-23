@@ -1,0 +1,54 @@
+From bc4ff3ac47dfe3d8690763f24ea573d921a90bae Mon Sep 17 00:00:00 2001
+From: t3hkitty <123781437+t3hkitty@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 05:35:37 +0000
+Subject: [PATCH 2/2] feat: register vaultr-staging pointer bundle manifest
+
+---
+ bundles/vaultr-staging.bundle.json | 35 ++++++++++++++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+ create mode 100644 bundles/vaultr-staging.bundle.json
+
+diff --git a/bundles/vaultr-staging.bundle.json b/bundles/vaultr-staging.bundle.json
+new file mode 100644
+index 0000000..59cc29a
+--- /dev/null
++++ b/bundles/vaultr-staging.bundle.json
+@@ -0,0 +1,35 @@
++{
++  "$schema": "https://raw.githubusercontent.com/t3hkitty/anymd/main/schemas/bundle.schema.json",
++  "id": "vaultr-staging",
++  "name": "Vaultr Staging & Headless Sync Bridge",
++  "version": "0.1.0",
++  "description": "Transient cloud intermediary cache manager (Google Drive 15GB, Dropbox 2GB) with out-of-band headless OAuth token injection (RCLONE_CONFIG_<REMOTE>_*), zero-disk-write rclone execution, hard quota enforcement, 7z .anymdz pack-first pipelines, and clear-after-verify auto-pruning.",
++  "author": "t3hkitty",
++  "homepage": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/staging",
++  "repository": {
++    "type": "git",
++    "url": "https://github.com/t3hkitty/vaultr-exts.git"
++  },
++  "category": "storage",
++  "enabledByDefault": true,
++  "bundleType": "pointer",
++  "entrypoint": "https://raw.githubusercontent.com/t3hkitty/vaultr-exts/main/extensions/staging/index.ts",
++  "sourceRepo": "t3hkitty/vaultr-exts",
++  "manifestUrl": "https://raw.githubusercontent.com/t3hkitty/vaultr-exts/main/registry/extensions.json",
++  "capabilities": [
++    "headless-oauth-env-injection",
++    "zero-config-disk-writes",
++    "pack-first-anymdz",
++    "quota-guard",
++    "clear-after-verify",
++    "rclone-staging-builder"
++  ],
++  "supportedRemotes": [
++    "gdrive-staging:",
++    "dbx-bridge:",
++    "koofr:",
++    "tbox:",
++    "davjump:",
++    "local"
++  ]
++}
+-- 
+2.56.1
+

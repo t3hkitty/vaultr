@@ -1,0 +1,446 @@
+From 2ca73399c3f64139e8ad000b7f80298ff652917d Mon Sep 17 00:00:00 2001
+From: t3hkitty <123781437+t3hkitty@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 05:13:47 +0000
+Subject: [PATCH 07/11] Scaffold vaultr-seedr extension with on-demand stream
+ resolution, VLC m3u8 hand-off, and TorBox-only testing notice
+
+---
+ extensions/index.ts       |   1 +
+ extensions/seedr/index.ts | 219 ++++++++++++++++++++++++++++++++++++++
+ extensions/seedr/types.ts |  23 ++++
+ registry/extensions.json  |  12 +++
+ tests/seedr.test.mjs      | 134 +++++++++++++++++++++++
+ 5 files changed, 389 insertions(+)
+ create mode 100644 extensions/seedr/index.ts
+ create mode 100644 extensions/seedr/types.ts
+ create mode 100644 tests/seedr.test.mjs
+
+diff --git a/extensions/index.ts b/extensions/index.ts
+index 1ee0297..15de47b 100644
+--- a/extensions/index.ts
++++ b/extensions/index.ts
+@@ -9,3 +9,4 @@ export * from './playlistr/index.js';
+ export * from './staging/index.js';
+ export * from './unpackr/index.js';
+ export * from './torbox/index.js';
++export * from './seedr/index.js';
+diff --git a/extensions/seedr/index.ts b/extensions/seedr/index.ts
+new file mode 100644
+index 0000000..816d77f
+--- /dev/null
++++ b/extensions/seedr/index.ts
+@@ -0,0 +1,219 @@
++import type {
++  IVaultrSubExtension,
++  VaultrExtensionManifest,
++  VaultrExtensionHostApi,
++  VaultrFileMetadata
++} from '../types.js';
++import type {
++  DebridProvider,
++  StreamResolutionOptions,
++  ResolvedStreamInfo,
++  VlcPlaylistItem
++} from './types.js';
++
++export const TORBOX_TESTED_NOTICE = 'Notice: only TorBox tested due to tool access. Seedr provider integration remains experimental/untested.';
++
++export class SeedrVlcExtension implements IVaultrSubExtension {
++  public manifest: VaultrExtensionManifest = {
++    id: 'vaultr-seedr',
++    name: 'Seedr & Remote Debrid VLC Stream & M3U8 Bridge',
++    version: '0.1.0',
++    description: 'Resolves on-demand fresh stream/download URLs for VLC playback and .m3u8 dynamic shelves. Note: Only TorBox tested due to tool access.',
++    category: 'storage',
++    author: 't3hkitty',
++    entrypoint: 'extensions/seedr/index.ts',
++    sourceUrl: 'https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/seedr',
++    enabledByDefault: true,
++    capabilities: [
++      'on-demand-stream-resolve',
++      'vlc-m3u8-extvlcopt',
++      'vlc-command-hand-off',
++      'expired-link-refresh',
++      'torbox-tested-provider'
++    ]
++  };
++
++  private hostApi!: VaultrExtensionHostApi;
++  private torboxApiKey?: string;
++  private seedrToken?: string;
++
++  constructor(options: { torboxApiKey?: string; seedrToken?: string } = {}) {
++    this.torboxApiKey = options.torboxApiKey;
++    this.seedrToken = options.seedrToken;
++  }
++
++  public init(api: VaultrExtensionHostApi): void {
++    this.hostApi = api;
++    this.logRedacted('init', `Seedr/Debrid VLC Bridge initialized. ${TORBOX_TESTED_NOTICE}`);
++  }
++
++  public setTorboxKey(key: string): void {
++    this.torboxApiKey = key;
++  }
++
++  public setSeedrToken(token: string): void {
++    this.seedrToken = token;
++  }
++
++  /**
++   * Redacts sensitive tokens before logging to AnyMD host
++   */
++  public logRedacted(stage: string, message: string, meta: Record<string, unknown> = {}): void {
++    const sanitizedMeta = { ...meta };
++    if (sanitizedMeta.token || sanitizedMeta.key || sanitizedMeta.apiKey) {
++      delete sanitizedMeta.token;
++      delete sanitizedMeta.key;
++      delete sanitizedMeta.apiKey;
++      sanitizedMeta.tokenRedacted = true;
++    }
++
++    let sanitizedMsg = message;
++    if (this.torboxApiKey) {
++      sanitizedMsg = sanitizedMsg.replace(new RegExp(this.torboxApiKey, 'g'), '[REDACTED_TORBOX_KEY]');
++    }
++    if (this.seedrToken) {
++      sanitizedMsg = sanitizedMsg.replace(new RegExp(this.seedrToken, 'g'), '[REDACTED_SEEDR_TOKEN]');
++    }
++
++    this.hostApi?.log({
++      timestamp: new Date().toISOString(),
++      level: 'info',
++      source: 'vaultr:seedr:vlc',
++      stage,
++      message: sanitizedMsg,
++      meta: {
++        ...sanitizedMeta,
++        providerNotice: TORBOX_TESTED_NOTICE
++      }
++    });
++  }
++
++  /**
++   * Resolves a fresh stream URL on-demand right when "Play in VLC" is triggered
++   */
++  public resolveFreshStreamUrl(
++    item: VaultrFileMetadata,
++    options: StreamResolutionOptions = {}
++  ): ResolvedStreamInfo {
++    const provider: DebridProvider = options.provider || (item.custom?.backend === 'torbox' ? 'torbox' : 'torbox');
++
++    if (provider === 'torbox') {
++      const torboxId = item.custom?.torbox_id || '0';
++      const fileId = item.custom?.file_id || '0';
++      const apiKey = this.torboxApiKey || 'LOCAL_KEY_OR_ENV';
++
++      // Build TorBox requestdl URL
++      // TorBox download links provide a 3-hour window to start, and near-unlimited once initiated
++      const streamUrl = `https://api.torbox.app/v1/api/torrents/requestdl?token=${apiKey}&torrent_id=${torboxId}&file_id=${fileId}&zip=false`;
++
++      this.logRedacted('resolve', `Resolved fresh TorBox stream for item [${item.path}]`, {
++        torboxId,
++        fileId,
++        provider: 'torbox'
++      });
++
++      return {
++        streamUrl,
++        provider: 'torbox',
++        resolvedAt: new Date().toISOString(),
++        expiresInSeconds: 3 * 60 * 60, // 3 hours window to start
++        testedStatus: 'verified (TorBox)',
++        isDirectStreamable: true
++      };
++    } else {
++      // Seedr experimental branch
++      const seedrFileId = item.custom?.seedr_file_id || '0';
++      const streamUrl = `https://www.seedr.cc/download/file/${seedrFileId}`;
++
++      this.logRedacted('resolve', `Resolved experimental Seedr URL for item [${item.path}]. Note: only TorBox tested due to tool access.`, {
++        seedrFileId,
++        provider: 'seedr_cc'
++      });
++
++      return {
++        streamUrl,
++        provider: 'seedr_cc',
++        resolvedAt: new Date().toISOString(),
++        testedStatus: 'untested (Seedr - only TorBox tested due to tool access)',
++        isDirectStreamable: true
++      };
++    }
++  }
++
++  /**
++   * Generates extended M3U8 string with #EXTVLCOPT: options for VLC multi-track streaming
++   */
++  public generateVlcM3u8(playlistName: string, items: VlcPlaylistItem[]): string {
++    const lines = [
++      '#EXTM3U',
++      `#PLAYLIST:${playlistName}`,
++      `#COMMENT:${TORBOX_TESTED_NOTICE}`
++    ];
++
++    for (const item of items) {
++      const dur = item.durationSeconds ?? -1;
++      lines.push(`#EXTINF:${dur},${item.title}`);
++
++      // Add VLC-specific options (caching, user-agent, etc.)
++      const vlcOpts = item.vlcOptions || [':network-caching=3000'];
++      for (const opt of vlcOpts) {
++        lines.push(`#EXTVLCOPT${opt}`);
++      }
++
++      lines.push(item.streamUrl);
++    }
++
++    return lines.join('\n');
++  }
++
++  /**
++   * Builds the CLI execution command to launch VLC with stream URL or playlist
++   */
++  public buildVlcLaunchCommand(targetUrlOrPlaylistPath: string): { command: string; args: string[]; fullCommandLine: string } {
++    // Detect OS: vlc on Linux/macOS, "vlc.exe" on Windows
++    const command = 'vlc';
++    const args = ['--network-caching=3000', targetUrlOrPlaylistPath];
++    const fullCommandLine = `vlc --network-caching=3000 "${targetUrlOrPlaylistPath}"`;
++
++    this.logRedacted('vlc-launch', `Launching VLC with target: ${targetUrlOrPlaylistPath}`);
++
++    return {
++      command,
++      args,
++      fullCommandLine
++    };
++  }
++
++  /**
++   * Determines fallback action if link expires or direct streaming fails
++   */
++  public determineStreamFallback(
++    item: VaultrFileMetadata,
++    errorOrStatus?: string
++  ): { fallbackAction: 'refresh_link' | 'unpackr_handoff' | 'rclone_pull'; description: string } {
++    const isArchive = ['zip', 'rar', '7z', 'tar'].some(ext => item.path.toLowerCase().endsWith(ext));
++
++    if (isArchive) {
++      return {
++        fallbackAction: 'unpackr_handoff',
++        description: 'Item is an archive bundle. Handing off to unpackr for selective file extraction.'
++      };
++    }
++
++    if (errorOrStatus === '403' || errorOrStatus === '410' || errorOrStatus === 'expired') {
++      return {
++        fallbackAction: 'refresh_link',
++        description: 'Stream link has expired. Requesting a fresh link via API.'
++      };
++    }
++
++    return {
++      fallbackAction: 'rclone_pull',
++      description: 'Single-file pull via rclone (tbox:) on demand.'
++    };
++  }
++}
++
++export default function createExtension(): IVaultrSubExtension {
++  return new SeedrVlcExtension();
++}
+diff --git a/extensions/seedr/types.ts b/extensions/seedr/types.ts
+new file mode 100644
+index 0000000..20ce5cf
+--- /dev/null
++++ b/extensions/seedr/types.ts
+@@ -0,0 +1,23 @@
++export type DebridProvider = 'torbox' | 'seedr_cc';
++
++export interface StreamResolutionOptions {
++  provider?: DebridProvider;
++  forceFresh?: boolean;
++  userAgent?: string;
++}
++
++export interface ResolvedStreamInfo {
++  streamUrl: string;
++  provider: DebridProvider;
++  resolvedAt: string;
++  expiresInSeconds?: number;
++  testedStatus: string; // e.g. "verified (TorBox)" | "untested (Seedr - only TorBox tested due to tool access)"
++  isDirectStreamable: boolean;
++}
++
++export interface VlcPlaylistItem {
++  title: string;
++  streamUrl: string;
++  durationSeconds?: number;
++  vlcOptions?: string[]; // e.g. [":network-caching=3000", ":http-user-agent=VaultrVlcBridge"]
++}
+diff --git a/registry/extensions.json b/registry/extensions.json
+index 023e6cd..28c6ba1 100644
+--- a/registry/extensions.json
++++ b/registry/extensions.json
+@@ -122,6 +122,18 @@
+       "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/torbox",
+       "enabledByDefault": true,
+       "capabilities": ["torbox-direct-api", "bearer-token-redaction", "sidecar-first-torbox-index", "selective-torbox-download", "unpackr-handoff"]
++    },
++    {
++      "id": "vaultr-seedr",
++      "name": "Seedr & Remote Debrid VLC Stream & M3U8 Bridge",
++      "version": "0.1.0",
++      "description": "Resolves on-demand fresh stream/download URLs for VLC playback and .m3u8 dynamic shelves. Note: Only TorBox tested due to tool access.",
++      "category": "storage",
++      "author": "t3hkitty",
++      "entrypoint": "https://raw.githubusercontent.com/t3hkitty/vaultr-exts/main/extensions/seedr/index.ts",
++      "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/seedr",
++      "enabledByDefault": true,
++      "capabilities": ["on-demand-stream-resolve", "vlc-m3u8-extvlcopt", "vlc-command-hand-off", "expired-link-refresh", "torbox-tested-provider"]
+     }
+   ]
+ }
+diff --git a/tests/seedr.test.mjs b/tests/seedr.test.mjs
+new file mode 100644
+index 0000000..49d4f77
+--- /dev/null
++++ b/tests/seedr.test.mjs
+@@ -0,0 +1,134 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { SeedrVlcExtension, TORBOX_TESTED_NOTICE } from '../dist/seedr/index.js';
++
++function createMockHost() {
++  const logs = [];
++  return {
++    log: (entry) => logs.push(entry),
++    getFiles: () => [],
++    getFileByPath: () => undefined,
++    saveSidecar: async () => {},
++    executeRclonePreview: () => {},
++    logs
++  };
++}
++
++test('SeedrVlcExtension logs explicit TorBox-only testing notice on init and redacts tokens', () => {
++  const host = createMockHost();
++  const ext = new SeedrVlcExtension({
++    torboxApiKey: 'TORBOX_SECRET_9999',
++    seedrToken: 'SEEDR_SECRET_7777'
++  });
++  ext.init(host);
++
++  assert.equal(host.logs.length, 1);
++  const initLog = host.logs[0];
++  assert.equal(initLog.source, 'vaultr:seedr:vlc');
++  assert.ok(initLog.message.includes(TORBOX_TESTED_NOTICE));
++  assert.ok(initLog.meta.providerNotice.includes('only TorBox tested due to tool access'));
++
++  ext.logRedacted('stream', 'Playing with token TORBOX_SECRET_9999 and key SEEDR_SECRET_7777', {
++    token: 'TORBOX_SECRET_9999'
++  });
++
++  const streamLog = host.logs[1];
++  assert.ok(!streamLog.message.includes('TORBOX_SECRET_9999'));
++  assert.ok(streamLog.message.includes('[REDACTED_TORBOX_KEY]'));
++  assert.ok(streamLog.message.includes('[REDACTED_SEEDR_TOKEN]'));
++  assert.equal(streamLog.meta.token, undefined);
++  assert.equal(streamLog.meta.tokenRedacted, true);
++});
++
++test('SeedrVlcExtension resolves fresh on-demand stream URL for TorBox with 3h window and verified status', () => {
++  const host = createMockHost();
++  const ext = new SeedrVlcExtension({
++    torboxApiKey: 'test_key'
++  });
++  ext.init(host);
++
++  const mediaItem = {
++    path: 'tbox:/Movies/Inception.mp4',
++    remote: 'tbox:',
++    remotePath: 'Movies/Inception.mp4',
++    md5: 'hash_inc',
++    size: 2500000000,
++    mtime: '2026-11-20T10:00:00Z',
++    mimeOrExt: 'mp4',
++    tags: ['movie'],
++    custom: {
++      backend: 'torbox',
++      torbox_id: 501,
++      file_id: 12
++    }
++  };
++
++  const resolved = ext.resolveFreshStreamUrl(mediaItem);
++  assert.equal(resolved.provider, 'torbox');
++  assert.ok(resolved.streamUrl.includes('torrent_id=501'));
++  assert.ok(resolved.streamUrl.includes('file_id=12'));
++  assert.equal(resolved.expiresInSeconds, 10800); // 3 hours window
++  assert.equal(resolved.testedStatus, 'verified (TorBox)');
++  assert.equal(resolved.isDirectStreamable, true);
++});
++
++test('SeedrVlcExtension generates .m3u8 playlist with #EXTVLCOPT and provider testing notice', () => {
++  const host = createMockHost();
++  const ext = new SeedrVlcExtension();
++  ext.init(host);
++
++  const items = [
++    {
++      title: 'Episode 1',
++      streamUrl: 'https://api.torbox.app/v1/api/torrents/requestdl?token=REDACTED&torrent_id=1&file_id=1&zip=false',
++      durationSeconds: 3600,
++      vlcOptions: [':network-caching=5000', ':http-user-agent=Vaultr']
++    }
++  ];
++
++  const m3u8 = ext.generateVlcM3u8('My Season Stream', items);
++  assert.ok(m3u8.startsWith('#EXTM3U\n#PLAYLIST:My Season Stream'));
++  assert.ok(m3u8.includes('#COMMENT:Notice: only TorBox tested due to tool access.'));
++  assert.ok(m3u8.includes('#EXTINF:3600,Episode 1'));
++  assert.ok(m3u8.includes('#EXTVLCOPT:network-caching=5000'));
++  assert.ok(m3u8.includes('#EXTVLCOPT:http-user-agent=Vaultr'));
++  assert.ok(m3u8.includes('https://api.torbox.app/v1/api/torrents/requestdl'));
++});
++
++test('SeedrVlcExtension builds CLI launch command and detects archive fallback', () => {
++  const host = createMockHost();
++  const ext = new SeedrVlcExtension();
++  ext.init(host);
++
++  const launch = ext.buildVlcLaunchCommand('https://stream.torbox.app/file.mp4');
++  assert.equal(launch.command, 'vlc');
++  assert.equal(launch.fullCommandLine, 'vlc --network-caching=3000 "https://stream.torbox.app/file.mp4"');
++
++  // Archive fallback
++  const archiveItem = {
++    path: 'tbox:/bundle.rar',
++    remote: 'tbox:',
++    remotePath: 'bundle.rar',
++    md5: 'hash_rar',
++    size: 5000000000,
++    mtime: '2026-11-20',
++    mimeOrExt: 'rar',
++    tags: []
++  };
++  const fallback = ext.determineStreamFallback(archiveItem);
++  assert.equal(fallback.fallbackAction, 'unpackr_handoff');
++
++  // Expired link fallback
++  const singleFile = {
++    path: 'tbox:/audio.mp3',
++    remote: 'tbox:',
++    remotePath: 'audio.mp3',
++    md5: 'hash_mp3',
++    size: 5000000,
++    mtime: '2026-11-20',
++    mimeOrExt: 'mp3',
++    tags: []
++  };
++  const expiredFallback = ext.determineStreamFallback(singleFile, 'expired');
++  assert.equal(expiredFallback.fallbackAction, 'refresh_link');
++});
+-- 
+2.56.1
+

@@ -1,0 +1,1104 @@
+From 4fc5da163b34c4c1c5d0d4841682eca65de7ad5a Mon Sep 17 00:00:00 2001
+From: t3hkitty <123781437+t3hkitty@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 04:48:53 +0000
+Subject: [PATCH 01/11] Scaffold vaultr-exts sub-extensions: pandoc, movr,
+ tagger, kittlibr, backup manifest, and dedupe with registry
+
+---
+ .gitignore                   |   4 +
+ README.md                    |  37 +++++++++
+ extensions/backup/index.ts   | 128 +++++++++++++++++++++++++++++
+ extensions/dedupe/index.ts   |  54 ++++++++++++
+ extensions/index.ts          |   7 ++
+ extensions/kittlibr/index.ts |  85 +++++++++++++++++++
+ extensions/movr/index.ts     | 105 ++++++++++++++++++++++++
+ extensions/pandoc/index.ts   |  91 +++++++++++++++++++++
+ extensions/tagger/index.ts   |  78 ++++++++++++++++++
+ extensions/types.ts          |  55 +++++++++++++
+ package-lock.json            |  48 +++++++++++
+ package.json                 |  29 +++++++
+ registry/extensions.json     |  79 ++++++++++++++++++
+ tests/extensions.test.mjs    | 154 +++++++++++++++++++++++++++++++++++
+ tsconfig.json                |  18 ++++
+ 15 files changed, 972 insertions(+)
+ create mode 100644 .gitignore
+ create mode 100644 README.md
+ create mode 100644 extensions/backup/index.ts
+ create mode 100644 extensions/dedupe/index.ts
+ create mode 100644 extensions/index.ts
+ create mode 100644 extensions/kittlibr/index.ts
+ create mode 100644 extensions/movr/index.ts
+ create mode 100644 extensions/pandoc/index.ts
+ create mode 100644 extensions/tagger/index.ts
+ create mode 100644 extensions/types.ts
+ create mode 100644 package-lock.json
+ create mode 100644 package.json
+ create mode 100644 registry/extensions.json
+ create mode 100644 tests/extensions.test.mjs
+ create mode 100644 tsconfig.json
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..9451024
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,4 @@
++node_modules/
++dist/
++.DS_Store
++*.log
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..5016e2c
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,37 @@
++# Vaultr Extensions (`vaultr-exts`) 🧩
++> Modular sub-extensions catalog for Vaultr (the AnyMD vault and remote storage manager).
++
++Loaded dynamically in Vaultr's extension interface via GitHub raw manifests or the central registry catalog: [`registry/extensions.json`](file:///home/antigravity/t3hkitty/vaultr-exts/registry/extensions.json).
++
++---
++
++## Catalog of Sub-Extensions
++
++| Extension ID | Category | Description | Capabilities |
++| :--- | :--- | :--- | :--- |
++| **`vaultr-pandoc-converter`** | `converter` | Pandoc-based multi-format document conversion pipeline (epub, md, html, docx, pdf) preserving `.anymd` sidecar metadata and tags. | `pandoc-conversion`, `sidecar-metadata-preserve` |
++| **`vaultr-movr-organizer`** | `organizer` | Taxonomy rule-based file organizer moving files into clean hierarchies with `rclone moveto` dry-run plans and sidecar path tracking. | `rule-based-organize`, `sidecar-path-migration`, `rclone-move-plan` |
++| **`vaultr-content-tagger`** | `tagger` | Auto-evaluates tags based on file extensions, path structure, and sidecar text corpus without touching core media binaries. | `auto-tagging`, `sidecar-tag-sync` |
++| **`vaultr-kittlibr-metadata`** | `metadata` | Bridges rich book and document YAML metadata from Kittlibr into AnyMD sidecars with symlink and cross-index support. | `kittlibr-schema-sync`, `yaml-sidecar-enrichment`, `symlink-sidecar` |
++| **`vaultr-backup-manifest`** | `backup` | Archive and backup orchestrator generating `.manifests/*.anymd` sidecars with MD5 checksum verification and `rclone copy --files-from` pipelines. | `archive-creation`, `sidecar-manifest-verify`, `md5-backup-audit` |
++| **`vaultr-md5-dedupe`** | `dedupe` | Safe MD5 duplicate clustering, keeper selection, and non-destructive quarantine workflows. | `md5-deduplication`, `quarantine-preview`, `safe-resolution` |
++
++---
++
++## Cross-Platform File Manager Vision
++
++Vaultr is designed to function seamlessly across:
++- **Android**: Interfacing with the Android Document Chooser (SAF storage access).
++- **Windows**: Windows File Manager mounts (`Z:\`, `T:\`).
++- **Cloud & Remotes**: Surgical `rclone` endpoints (`davjump:`, `koofr:`, `tbox:`, `meow-vault`).
++- **Web / GitHub Pages**: Standalone pure HTML/JS bundle for AnyMD.
++
++---
++
++## Development & Test
++
++```bash
++npm install
++npm run build
++npm test
++```
+diff --git a/extensions/backup/index.ts b/extensions/backup/index.ts
+new file mode 100644
+index 0000000..3c9d0f8
+--- /dev/null
++++ b/extensions/backup/index.ts
+@@ -0,0 +1,128 @@
++import type {
++  IVaultrSubExtension,
++  VaultrExtensionManifest,
++  VaultrExtensionHostApi,
++  VaultrFileMetadata
++} from '../types.js';
++
++export interface BackupArchiveManifest {
++  archiveId: string;
++  createdAt: string;
++  sourceRemote: string;
++  destinationRemote: string;
++  totalFiles: number;
++  totalBytes: number;
++  checksumAlgorithm: 'md5';
++  manifestSidecarPath: string;
++  files: Array<{
++    path: string;
++    md5: string;
++    size: number;
++    mtime: string;
++    status: 'backed_up' | 'verified' | 'failed';
++  }>;
++}
++
++export class BackupManifestExtension implements IVaultrSubExtension {
++  public manifest: VaultrExtensionManifest = {
++    id: 'vaultr-backup-manifest',
++    name: 'Vaultr Backup & Sidecar Manifest System',
++    version: '0.1.0',
++    description: 'Archive and backup orchestrator with sidecar verification manifests, MD5 checksum confirmation, and rclone sync integration.',
++    category: 'backup',
++    author: 't3hkitty',
++    entrypoint: 'extensions/backup/index.ts',
++    sourceUrl: 'https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/backup',
++    enabledByDefault: true,
++    capabilities: ['archive-creation', 'sidecar-manifest-verify', 'md5-backup-audit']
++  };
++
++  private hostApi!: VaultrExtensionHostApi;
++
++  public init(api: VaultrExtensionHostApi): void {
++    this.hostApi = api;
++    this.hostApi.log({
++      timestamp: new Date().toISOString(),
++      level: 'info',
++      source: 'vaultr-backup-manifest',
++      stage: 'init',
++      message: 'Backup Manifest extension initialized.'
++    });
++  }
++
++  /**
++   * Generates a backup archive manifest sidecar record from indexed files
++   */
++  public createBackupManifest(
++    files: VaultrFileMetadata[],
++    sourceRemote: string,
++    destinationRemote: string
++  ): BackupArchiveManifest {
++    const archiveId = `backup_${Date.now()}`;
++    const totalBytes = files.reduce((acc, f) => acc + (f.size || 0), 0);
++
++    const manifest: BackupArchiveManifest = {
++      archiveId,
++      createdAt: new Date().toISOString(),
++      sourceRemote,
++      destinationRemote,
++      totalFiles: files.length,
++      totalBytes,
++      checksumAlgorithm: 'md5',
++      manifestSidecarPath: `.manifests/${archiveId}.anymd`,
++      files: files.map(f => ({
++        path: f.path,
++        md5: f.md5,
++        size: f.size,
++        mtime: f.mtime,
++        status: 'backed_up'
++      }))
++    };
++
++    return manifest;
++  }
++
++  /**
++   * Verifies existing backup files against the manifest checksums
++   */
++  public verifyBackup(
++    manifest: BackupArchiveManifest,
++    targetFiles: VaultrFileMetadata[]
++  ): { verified: boolean; matchedCount: number; mismatches: string[] } {
++    const targetMap = new Map(targetFiles.map(f => [f.path, f.md5.toLowerCase()]));
++    const mismatches: string[] = [];
++    let matchedCount = 0;
++
++    for (const record of manifest.files) {
++      const actualMd5 = targetMap.get(record.path);
++      if (!actualMd5) {
++        mismatches.push(`Missing: ${record.path}`);
++      } else if (actualMd5 !== record.md5.toLowerCase()) {
++        mismatches.push(`Checksum mismatch for ${record.path}: expected ${record.md5}, found ${actualMd5}`);
++      } else {
++        matchedCount++;
++      }
++    }
++
++    return {
++      verified: mismatches.length === 0,
++      matchedCount,
++      mismatches
++    };
++  }
++
++  /**
++   * Builds the targeted rclone backup copy command using --files-from
++   */
++  public buildBackupRcloneCommand(
++    sourceRemote: string,
++    destRemote: string,
++    manifestListFilePath: string
++  ): string {
++    return `rclone copy "${sourceRemote}" "${destRemote}" --files-from="${manifestListFilePath}" --checksum --dry-run`;
++  }
++}
++
++export default function createExtension(): IVaultrSubExtension {
++  return new BackupManifestExtension();
++}
+diff --git a/extensions/dedupe/index.ts b/extensions/dedupe/index.ts
+new file mode 100644
+index 0000000..8506dfd
+--- /dev/null
++++ b/extensions/dedupe/index.ts
+@@ -0,0 +1,54 @@
++import type {
++  IVaultrSubExtension,
++  VaultrExtensionManifest,
++  VaultrExtensionHostApi,
++  VaultrFileMetadata
++} from '../types.js';
++
++export class DedupeExtension implements IVaultrSubExtension {
++  public manifest: VaultrExtensionManifest = {
++    id: 'vaultr-md5-dedupe',
++    name: 'MD5 Deduplication & Quarantine Manager',
++    version: '0.1.0',
++    description: 'Safe MD5 checksum duplicate clustering, keeper selection, and non-destructive quarantine workflows.',
++    category: 'dedupe',
++    author: 't3hkitty',
++    entrypoint: 'extensions/dedupe/index.ts',
++    sourceUrl: 'https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/dedupe',
++    enabledByDefault: true,
++    capabilities: ['md5-deduplication', 'quarantine-preview', 'safe-resolution']
++  };
++
++  private hostApi!: VaultrExtensionHostApi;
++
++  public init(api: VaultrExtensionHostApi): void {
++    this.hostApi = api;
++    this.hostApi.log({
++      timestamp: new Date().toISOString(),
++      level: 'info',
++      source: 'vaultr-md5-dedupe',
++      stage: 'init',
++      message: 'Dedupe extension initialized.'
++    });
++  }
++
++  public groupDuplicates(files: VaultrFileMetadata[]): Map<string, VaultrFileMetadata[]> {
++    const map = new Map<string, VaultrFileMetadata[]>();
++    for (const f of files) {
++      if (!f.md5) continue;
++      const group = map.get(f.md5) || [];
++      group.push(f);
++      map.set(f.md5, group);
++    }
++    for (const [key, list] of map.entries()) {
++      if (list.length <= 1) {
++        map.delete(key);
++      }
++    }
++    return map;
++  }
++}
++
++export default function createExtension(): IVaultrSubExtension {
++  return new DedupeExtension();
++}
+diff --git a/extensions/index.ts b/extensions/index.ts
+new file mode 100644
+index 0000000..1a3f4d2
+--- /dev/null
++++ b/extensions/index.ts
+@@ -0,0 +1,7 @@
++export * from './types.js';
++export * from './pandoc/index.js';
++export * from './movr/index.js';
++export * from './tagger/index.js';
++export * from './kittlibr/index.js';
++export * from './backup/index.js';
++export * from './dedupe/index.js';
+diff --git a/extensions/kittlibr/index.ts b/extensions/kittlibr/index.ts
+new file mode 100644
+index 0000000..9035689
+--- /dev/null
++++ b/extensions/kittlibr/index.ts
+@@ -0,0 +1,85 @@
++import type {
++  IVaultrSubExtension,
++  VaultrExtensionManifest,
++  VaultrExtensionHostApi,
++  VaultrFileMetadata
++} from '../types.js';
++
++export interface KittlibrBookMetadata {
++  isbn?: string;
++  title: string;
++  author: string;
++  series?: string;
++  publisher?: string;
++  year?: number;
++  rating?: number;
++  description?: string;
++  tags?: string[];
++}
++
++export class KittlibrMetadataExtension implements IVaultrSubExtension {
++  public manifest: VaultrExtensionManifest = {
++    id: 'vaultr-kittlibr-metadata',
++    name: 'Kittlibr Metadata & Sidecar Bridge',
++    version: '0.1.0',
++    description: 'Bridges Kittlibr rich book/document YAML metadata directly into AnyMD sidecars with symlink and cross-index support.',
++    category: 'metadata',
++    author: 't3hkitty',
++    entrypoint: 'extensions/kittlibr/index.ts',
++    sourceUrl: 'https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/kittlibr',
++    enabledByDefault: true,
++    capabilities: ['kittlibr-schema-sync', 'yaml-sidecar-enrichment', 'symlink-sidecar']
++  };
++
++  private hostApi!: VaultrExtensionHostApi;
++
++  public init(api: VaultrExtensionHostApi): void {
++    this.hostApi = api;
++    this.hostApi.log({
++      timestamp: new Date().toISOString(),
++      level: 'info',
++      source: 'vaultr-kittlibr-metadata',
++      stage: 'init',
++      message: 'Kittlibr Metadata Bridge extension initialized.'
++    });
++  }
++
++  /**
++   * Enriches standard VaultrFileMetadata with Kittlibr book schema fields
++   */
++  public enrichMetadata(
++    file: VaultrFileMetadata,
++    kittlibrInfo: KittlibrBookMetadata
++  ): VaultrFileMetadata {
++    const enrichedCustom = {
++      ...(file.custom || {}),
++      kittlibr: {
++        isbn: kittlibrInfo.isbn,
++        series: kittlibrInfo.series,
++        publisher: kittlibrInfo.publisher,
++        year: kittlibrInfo.year,
++        rating: kittlibrInfo.rating,
++        synopsis: kittlibrInfo.description
++      }
++    };
++
++    const combinedTags = Array.from(new Set([...file.tags, ...(kittlibrInfo.tags || [])]));
++
++    return {
++      ...file,
++      tags: combinedTags,
++      custom: enrichedCustom
++    };
++  }
++
++  /**
++   * Builds symlink command linking a centralized Kittlibr metadata sidecar to a local vault path
++   */
++  public buildSymlinkCommand(targetSidecarPath: string, linkLocation: string): string {
++    return `ln -s "${targetSidecarPath}" "${linkLocation}"`;
++  }
++}
++
++export default function createExtension(): IVaultrSubExtension {
++  return new KittlibrMetadataExtension();
++}
+diff --git a/extensions/movr/index.ts b/extensions/movr/index.ts
+new file mode 100644
+index 0000000..a7182fe
+--- /dev/null
++++ b/extensions/movr/index.ts
+@@ -0,0 +1,105 @@
++import type {
++  IVaultrSubExtension,
++  VaultrExtensionManifest,
++  VaultrExtensionHostApi,
++  VaultrFileMetadata
++} from '../types.js';
++
++export interface MovrRule {
++  pattern: RegExp | string;
++  targetFolder: string;
++  matchField?: 'path' | 'mimeOrExt' | 'tag';
++}
++
++export interface MovrPlanItem {
++  file: VaultrFileMetadata;
++  sourcePath: string;
++  destinationPath: string;
++  rcloneCommand: string;
++}
++
++export class MovrOrganizerExtension implements IVaultrSubExtension {
++  public manifest: VaultrExtensionManifest = {
++    id: 'vaultr-movr-organizer',
++    name: 'Movr File & Vault Organizer',
++    version: '0.1.0',
++    description: 'Rule-based file organizer moving files into clean hierarchies and updating sidecars across local & rclone remotes.',
++    category: 'organizer',
++    author: 't3hkitty',
++    entrypoint: 'extensions/movr/index.ts',
++    sourceUrl: 'https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/movr',
++    enabledByDefault: true,
++    capabilities: ['rule-based-organize', 'sidecar-path-migration', 'rclone-move-plan']
++  };
++
++  private hostApi!: VaultrExtensionHostApi;
++
++  public init(api: VaultrExtensionHostApi): void {
++    this.hostApi = api;
++    this.hostApi.log({
++      timestamp: new Date().toISOString(),
++      level: 'info',
++      source: 'vaultr-movr-organizer',
++      stage: 'init',
++      message: 'Movr Organizer extension initialized.'
++    });
++  }
++
++  /**
++   * Plans file moves based on taxonomy rules without executing immediately
++   */
++  public generateOrganizationPlan(files: VaultrFileMetadata[], rules: MovrRule[]): MovrPlanItem[] {
++    const plan: MovrPlanItem[] = [];
++
++    for (const file of files) {
++      for (const rule of rules) {
++        let matched = false;
++        const field = rule.matchField || 'mimeOrExt';
++
++        if (field === 'mimeOrExt') {
++          matched = typeof rule.pattern === 'string'
++            ? file.mimeOrExt.toLowerCase() === rule.pattern.toLowerCase()
++            : rule.pattern.test(file.mimeOrExt);
++        } else if (field === 'path') {
++          matched = typeof rule.pattern === 'string'
++            ? file.path.includes(rule.pattern)
++            : rule.pattern.test(file.path);
++        } else if (field === 'tag') {
++          matched = file.tags.some(t => typeof rule.pattern === 'string' ? t === rule.pattern : rule.pattern.test(t));
++        }
++
++        if (matched) {
++          const filename = file.path.split(/[\/\\]/).pop() || 'file';
++          const destinationPath = `${rule.targetFolder.replace(/\/$/, '')}/${filename}`;
++
++          if (destinationPath !== file.path) {
++            const remotePrefix = file.remote.endsWith(':') ? file.remote : `${file.remote}:`;
++            const rcloneCmd = `rclone moveto "${remotePrefix}${file.remotePath}" "${remotePrefix}${destinationPath}" --dry-run`;
++            plan.push({
++              file,
++              sourcePath: file.path,
++              destinationPath,
++              rcloneCommand: rcloneCmd
++            });
++          }
++          break; // First matching rule wins
++        }
++      }
++    }
++
++    this.hostApi.log({
++      timestamp: new Date().toISOString(),
++      level: 'info',
++      source: 'vaultr-movr-organizer',
++      stage: 'organize',
++      message: `Generated organization plan for ${plan.length} files.`,
++      meta: { count: plan.length }
++    });
++
++    return plan;
++  }
++}
++
++export default function createExtension(): IVaultrSubExtension {
++  return new MovrOrganizerExtension();
++}
+diff --git a/extensions/pandoc/index.ts b/extensions/pandoc/index.ts
+new file mode 100644
+index 0000000..b5f8eef
+--- /dev/null
++++ b/extensions/pandoc/index.ts
+@@ -0,0 +1,91 @@
++import type {
++  IVaultrSubExtension,
++  VaultrExtensionManifest,
++  VaultrExtensionHostApi
++} from '../types.js';
++
++export interface PandocConversionSpec {
++  inputPath: string;
++  outputPath: string;
++  fromFormat?: string;
++  toFormat: string;
++  extraArgs?: string[];
++}
++
++export class PandocConverterExtension implements IVaultrSubExtension {
++  public manifest: VaultrExtensionManifest = {
++    id: 'vaultr-pandoc-converter',
++    name: 'Pandoc Document Converter',
++    version: '0.1.0',
++    description: 'Pandoc-based document conversion pipeline (epub, md, html, docx, pdf) with sidecar metadata retention.',
++    category: 'converter',
++    author: 't3hkitty',
++    entrypoint: 'extensions/pandoc/index.ts',
++    sourceUrl: 'https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/pandoc',
++    enabledByDefault: true,
++    capabilities: ['pandoc-conversion', 'sidecar-metadata-preserve']
++  };
++
++  private hostApi!: VaultrExtensionHostApi;
++
++  public init(api: VaultrExtensionHostApi): void {
++    this.hostApi = api;
++    this.hostApi.log({
++      timestamp: new Date().toISOString(),
++      level: 'info',
++      source: 'vaultr-pandoc-converter',
++      stage: 'init',
++      message: 'Pandoc Converter extension initialized.'
++    });
++  }
++
++  /**
++   * Generates safe pandoc command execution line
++   */
++  public buildPandocCommand(spec: PandocConversionSpec): { command: string; args: string[]; fullCommandLine: string } {
++    const args = [spec.inputPath, '-o', spec.outputPath];
++    if (spec.fromFormat) {
++      args.unshift(`-f`, spec.fromFormat);
++    }
++    if (spec.toFormat) {
++      args.push(`-t`, spec.toFormat);
++    }
++    if (spec.extraArgs) {
++      args.push(...spec.extraArgs);
++    }
++
++    const fullCommandLine = `pandoc ${args.map(a => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`;
++    return {
++      command: 'pandoc',
++      args,
++      fullCommandLine
++    };
++  }
++
++  /**
++   * Builds converted file sidecar preserving existing tags and frontmatter
++   */
++  public createConvertedSidecar(
++    originalPath: string,
++    newOutputPath: string,
++    newExt: string
++  ): void {
++    const originalMeta = this.hostApi.getFileByPath(originalPath);
++    if (!originalMeta) return;
++
++    const convertedMeta = {
++      ...originalMeta,
++      path: newOutputPath,
++      remotePath: newOutputPath,
++      mimeOrExt: newExt,
++      tags: [...originalMeta.tags, `converted-from:${originalMeta.mimeOrExt}`],
++      mtime: new Date().toISOString()
++    };
++
++    this.hostApi.saveSidecar(convertedMeta, `# Converted from ${originalPath}\nSource format: ${originalMeta.mimeOrExt}`);
++  }
++}
++
++export default function createExtension(): IVaultrSubExtension {
++  return new PandocConverterExtension();
++}
+diff --git a/extensions/tagger/index.ts b/extensions/tagger/index.ts
+new file mode 100644
+index 0000000..cda32a3
+--- /dev/null
++++ b/extensions/tagger/index.ts
+@@ -0,0 +1,78 @@
++import type {
++  IVaultrSubExtension,
++  VaultrExtensionManifest,
++  VaultrExtensionHostApi,
++  VaultrFileMetadata
++} from '../types.js';
++
++export interface TaggingRule {
++  tag: string;
++  keywords: string[];
++  extensions?: string[];
++}
++
++export class ContentTaggerExtension implements IVaultrSubExtension {
++  public manifest: VaultrExtensionManifest = {
++    id: 'vaultr-content-tagger',
++    name: 'Smart Content & Metadata Tagger',
++    version: '0.1.0',
++    description: 'Auto-tags files and sidecars based on file patterns, text analysis, and sidecar notes without altering files.',
++    category: 'tagger',
++    author: 't3hkitty',
++    entrypoint: 'extensions/tagger/index.ts',
++    sourceUrl: 'https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/tagger',
++    enabledByDefault: true,
++    capabilities: ['auto-tagging', 'sidecar-tag-sync']
++  };
++
++  private hostApi!: VaultrExtensionHostApi;
++
++  public init(api: VaultrExtensionHostApi): void {
++    this.hostApi = api;
++    this.hostApi.log({
++      timestamp: new Date().toISOString(),
++      level: 'info',
++      source: 'vaultr-content-tagger',
++      stage: 'init',
++      message: 'Content Tagger extension initialized.'
++    });
++  }
++
++  /**
++   * Evaluates rules against a file's path, metadata, and optional note content
++   */
++  public evaluateTags(file: VaultrFileMetadata, noteContent = '', rules: TaggingRule[]): string[] {
++    const existingTags = new Set<string>(file.tags);
++    const textCorpus = `${file.path} ${file.mimeOrExt} ${noteContent}`.toLowerCase();
++
++    for (const rule of rules) {
++      if (rule.extensions && rule.extensions.length > 0) {
++        const matchesExt = rule.extensions.some(ext => file.path.toLowerCase().endsWith(ext.toLowerCase()));
++        if (!matchesExt) continue;
++      }
++
++      const matchesKeyword = rule.keywords.some(kw => textCorpus.includes(kw.toLowerCase()));
++      if (matchesKeyword) {
++        existingTags.add(rule.tag);
++      }
++    }
++
++    return Array.from(existingTags);
++  }
++
++  /**
++   * Applies new tags to the sidecar
++   */
++  public async applyTags(file: VaultrFileMetadata, newTags: string[]): Promise<VaultrFileMetadata> {
++    const updated: VaultrFileMetadata = {
++      ...file,
++      tags: newTags
++    };
++    await this.hostApi.saveSidecar(updated);
++    return updated;
++  }
++}
++
++export default function createExtension(): IVaultrSubExtension {
++  return new ContentTaggerExtension();
++}
+diff --git a/extensions/types.ts b/extensions/types.ts
+new file mode 100644
+index 0000000..5dc57d1
+--- /dev/null
++++ b/extensions/types.ts
+@@ -0,0 +1,55 @@
++/**
++ * Core type interfaces for Vaultr Sub-Extensions in vaultr-exts
++ */
++
++export interface VaultrFileMetadata {
++  path: string;
++  remote: string;
++  remotePath: string;
++  md5: string;
++  size: number;
++  mtime: string;
++  mimeOrExt: string;
++  tags: string[];
++  sidecarPath?: string;
++  custom?: Record<string, unknown>;
++}
++
++export interface VaultrLogEntry {
++  timestamp: string;
++  level: 'debug' | 'info' | 'warn' | 'error';
++  source: string;
++  stage: string;
++  message: string;
++  meta?: Record<string, unknown>;
++}
++
++export interface VaultrExtensionHostApi {
++  log: (entry: VaultrLogEntry) => void;
++  getFiles: () => VaultrFileMetadata[];
++  getFileByPath: (path: string) => VaultrFileMetadata | undefined;
++  saveSidecar: (metadata: VaultrFileMetadata, notesBody?: string) => Promise<void>;
++  executeRclonePreview: (commandLine: string, description: string) => void;
++  quarantineDuplicate?: (path: string, targetPath: string) => Promise<void>;
++  registerUI?: (tabId: string, label: string, element: HTMLElement) => void;
++}
++
++export interface VaultrExtensionManifest {
++  id: string;
++  name: string;
++  version: string;
++  description: string;
++  category: 'dedupe' | 'converter' | 'organizer' | 'tagger' | 'metadata' | 'backup' | 'storage';
++  author: string;
++  entrypoint: string;
++  sourceUrl: string;
++  enabledByDefault: boolean;
++  capabilities: string[];
++  options?: Record<string, unknown>;
++}
++
++export interface IVaultrSubExtension {
++  manifest: VaultrExtensionManifest;
++  init: (api: VaultrExtensionHostApi) => Promise<void> | void;
++  destroy?: () => Promise<void> | void;
++}
+diff --git a/package-lock.json b/package-lock.json
+new file mode 100644
+index 0000000..5f4ea3a
+--- /dev/null
++++ b/package-lock.json
+@@ -0,0 +1,48 @@
++{
++  "name": "@t3hkitty/vaultr-exts",
++  "version": "0.1.0",
++  "lockfileVersion": 3,
++  "requires": true,
++  "packages": {
++    "": {
++      "name": "@t3hkitty/vaultr-exts",
++      "version": "0.1.0",
++      "license": "MIT",
++      "devDependencies": {
++        "@types/node": "^20.19.43",
++        "typescript": "^5.9.3"
++      }
++    },
++    "node_modules/@types/node": {
++      "version": "20.19.43",
++      "resolved": "https://registry.npmjs.org/@types/node/-/node-20.19.43.tgz",
++      "integrity": "sha512-6oYBAi5ikg4Pl+kGsoYtawUMBT2zZMCvPNF7pVLnHZfd1zf38DRiWn/gT01RYCdUqkv7Fhr+C9ot4/tb+2sVvA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "undici-types": "~6.21.0"
++      }
++    },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
++    "node_modules/undici-types": {
++      "version": "6.21.0",
++      "resolved": "https://registry.npmjs.org/undici-types/-/undici-types-6.21.0.tgz",
++      "integrity": "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==",
++      "dev": true,
++      "license": "MIT"
++    }
++  }
++}
+diff --git a/package.json b/package.json
+new file mode 100644
+index 0000000..67b789f
+--- /dev/null
++++ b/package.json
+@@ -0,0 +1,29 @@
++{
++  "name": "@t3hkitty/vaultr-exts",
++  "version": "0.1.0",
++  "description": "Modular extension repository for Vaultr file and remote vault manager. Includes Pandoc converter, Movr organizer, Content Tagger, Kittlibr metadata symlinker, Backup & Sidecar Manifest system, and Dedupe extensions.",
++  "type": "module",
++  "main": "dist/index.js",
++  "scripts": {
++    "build": "tsc",
++    "test": "node --test tests/*.test.mjs"
++  },
++  "keywords": [
++    "vaultr",
++    "vaultr-exts",
++    "anymd",
++    "pandoc",
++    "movr",
++    "tagger",
++    "kittlibr",
++    "backup",
++    "manifest",
++    "rclone"
++  ],
++  "author": "t3hkitty",
++  "license": "MIT",
++  "devDependencies": {
++    "@types/node": "^20.19.43",
++    "typescript": "^5.9.3"
++  }
++}
+diff --git a/registry/extensions.json b/registry/extensions.json
+new file mode 100644
+index 0000000..b054258
+--- /dev/null
++++ b/registry/extensions.json
+@@ -0,0 +1,79 @@
++{
++  "version": "1.0.0",
++  "repo": "t3hkitty/vaultr-exts",
++  "updatedAt": "2026-11-23T04:47:00Z",
++  "extensions": [
++    {
++      "id": "vaultr-pandoc-converter",
++      "name": "Pandoc Document Converter",
++      "version": "0.1.0",
++      "description": "Pandoc-based document conversion pipeline (epub, md, html, docx, pdf) with sidecar metadata retention.",
++      "category": "converter",
++      "author": "t3hkitty",
++      "entrypoint": "https://raw.githubusercontent.com/t3hkitty/vaultr-exts/main/extensions/pandoc/index.ts",
++      "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/pandoc",
++      "enabledByDefault": true,
++      "capabilities": ["pandoc-conversion", "sidecar-metadata-preserve"]
++    },
++    {
++      "id": "vaultr-movr-organizer",
++      "name": "Movr File & Vault Organizer",
++      "version": "0.1.0",
++      "description": "Rule-based file organizer moving files into clean hierarchies and updating sidecars across local & rclone remotes.",
++      "category": "organizer",
++      "author": "t3hkitty",
++      "entrypoint": "https://raw.githubusercontent.com/t3hkitty/vaultr-exts/main/extensions/movr/index.ts",
++      "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/movr",
++      "enabledByDefault": true,
++      "capabilities": ["rule-based-organize", "sidecar-path-migration", "rclone-move-plan"]
++    },
++    {
++      "id": "vaultr-content-tagger",
++      "name": "Smart Content & Metadata Tagger",
++      "version": "0.1.0",
++      "description": "Auto-tags files and sidecars based on file patterns, text analysis, and sidecar notes without altering files.",
++      "category": "tagger",
++      "author": "t3hkitty",
++      "entrypoint": "https://raw.githubusercontent.com/t3hkitty/vaultr-exts/main/extensions/tagger/index.ts",
++      "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/tagger",
++      "enabledByDefault": true,
++      "capabilities": ["auto-tagging", "sidecar-tag-sync"]
++    },
++    {
++      "id": "vaultr-kittlibr-metadata",
++      "name": "Kittlibr Metadata & Sidecar Bridge",
++      "version": "0.1.0",
++      "description": "Bridges Kittlibr rich book/document YAML metadata directly into AnyMD sidecars with symlink and cross-index support.",
++      "category": "metadata",
++      "author": "t3hkitty",
++      "entrypoint": "https://raw.githubusercontent.com/t3hkitty/vaultr-exts/main/extensions/kittlibr/index.ts",
++      "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/kittlibr",
++      "enabledByDefault": true,
++      "capabilities": ["kittlibr-schema-sync", "yaml-sidecar-enrichment", "symlink-sidecar"]
++    },
++    {
++      "id": "vaultr-backup-manifest",
++      "name": "Vaultr Backup & Sidecar Manifest System",
++      "version": "0.1.0",
++      "description": "Archive and backup orchestrator with sidecar verification manifests, MD5 checksum confirmation, and rclone sync integration.",
++      "category": "backup",
++      "author": "t3hkitty",
++      "entrypoint": "https://raw.githubusercontent.com/t3hkitty/vaultr-exts/main/extensions/backup/index.ts",
++      "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/backup",
++      "enabledByDefault": true,
++      "capabilities": ["archive-creation", "sidecar-manifest-verify", "md5-backup-audit"]
++    },
++    {
++      "id": "vaultr-md5-dedupe",
++      "name": "MD5 Deduplication & Quarantine Manager",
++      "version": "0.1.0",
++      "description": "Safe MD5 checksum duplicate clustering, keeper selection, and non-destructive quarantine workflows.",
++      "category": "dedupe",
++      "author": "t3hkitty",
++      "entrypoint": "https://raw.githubusercontent.com/t3hkitty/vaultr-exts/main/extensions/dedupe/index.ts",
++      "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/dedupe",
++      "enabledByDefault": true,
++      "capabilities": ["md5-deduplication", "quarantine-preview", "safe-resolution"]
++    }
++  ]
++}
+diff --git a/tests/extensions.test.mjs b/tests/extensions.test.mjs
+new file mode 100644
+index 0000000..2a3ab9d
+--- /dev/null
++++ b/tests/extensions.test.mjs
+@@ -0,0 +1,154 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { PandocConverterExtension } from '../dist/pandoc/index.js';
++import { MovrOrganizerExtension } from '../dist/movr/index.js';
++import { ContentTaggerExtension } from '../dist/tagger/index.js';
++import { KittlibrMetadataExtension } from '../dist/kittlibr/index.js';
++import { BackupManifestExtension } from '../dist/backup/index.js';
++
++function createMockHost() {
++  const logs = [];
++  return {
++    log: (entry) => logs.push(entry),
++    getFiles: () => [],
++    getFileByPath: () => undefined,
++    saveSidecar: async () => {},
++    executeRclonePreview: () => {},
++    logs
++  };
++}
++
++test('PandocConverterExtension builds valid conversion commands', () => {
++  const mockHost = createMockHost();
++  const ext = new PandocConverterExtension();
++  ext.init(mockHost);
++
++  const cmd = ext.buildPandocCommand({
++    inputPath: 'notes/guide.md',
++    outputPath: 'notes/guide.epub',
++    fromFormat: 'markdown',
++    toFormat: 'epub'
++  });
++
++  assert.equal(cmd.command, 'pandoc');
++  assert.equal(cmd.fullCommandLine, 'pandoc -f markdown notes/guide.md -o notes/guide.epub -t epub');
++  assert.ok(mockHost.logs.length > 0);
++});
++
++test('MovrOrganizerExtension creates rules-based rclone move plans', () => {
++  const mockHost = createMockHost();
++  const ext = new MovrOrganizerExtension();
++  ext.init(mockHost);
++
++  const files = [
++    {
++      path: 'inbox/paper.pdf',
++      remote: 'koofr:',
++      remotePath: 'inbox/paper.pdf',
++      md5: '123456',
++      size: 1024,
++      mtime: '2026-01-01',
++      mimeOrExt: 'pdf',
++      tags: []
++    }
++  ];
++
++  const rules = [
++    { matchField: 'mimeOrExt', pattern: 'pdf', targetFolder: 'Documents/PDFs' }
++  ];
++
++  const plan = ext.generateOrganizationPlan(files, rules);
++  assert.equal(plan.length, 1);
++  assert.equal(plan[0].destinationPath, 'Documents/PDFs/paper.pdf');
++  assert.ok(plan[0].rcloneCommand.includes('rclone moveto "koofr:inbox/paper.pdf" "koofr:Documents/PDFs/paper.pdf" --dry-run'));
++});
++
++test('ContentTaggerExtension auto-evaluates tags from content and metadata', () => {
++  const mockHost = createMockHost();
++  const ext = new ContentTaggerExtension();
++  ext.init(mockHost);
++
++  const file = {
++    path: 'library/cybernetics.epub',
++    remote: 'local',
++    remotePath: 'library/cybernetics.epub',
++    md5: '78910',
++    size: 2048,
++    mtime: '2026-02-01',
++    mimeOrExt: 'epub',
++    tags: ['reading']
++  };
++
++  const rules = [
++    { tag: 'tech', keywords: ['cybernetics', 'ai'], extensions: ['epub', 'pdf'] }
++  ];
++
++  const tags = ext.evaluateTags(file, 'Introduction to neural feedback and cybernetics', rules);
++  assert.ok(tags.includes('reading'));
++  assert.ok(tags.includes('tech'));
++});
++
++test('KittlibrMetadataExtension enriches sidecar metadata with book schema and symlink', () => {
++  const mockHost = createMockHost();
++  const ext = new KittlibrMetadataExtension();
++  ext.init(mockHost);
++
++  const file = {
++    path: 'books/neuromancer.epub',
++    remote: 'local',
++    remotePath: 'books/neuromancer.epub',
++    md5: 'aaaabbbb',
++    size: 500000,
++    mtime: '2026-03-01',
++    mimeOrExt: 'epub',
++    tags: ['scifi']
++  };
++
++  const enriched = ext.enrichMetadata(file, {
++    isbn: '9780441569595',
++    title: 'Neuromancer',
++    author: 'William Gibson',
++    series: 'Sprawl #1',
++    tags: ['cyberpunk']
++  });
++
++  assert.ok(enriched.tags.includes('scifi'));
++  assert.ok(enriched.tags.includes('cyberpunk'));
++  assert.equal(enriched.custom?.kittlibr?.isbn, '9780441569595');
++
++  const symlinkCmd = ext.buildSymlinkCommand('/central/kittlibr/notes.anymd', '/vault/books/notes.anymd');
++  assert.equal(symlinkCmd, 'ln -s "/central/kittlibr/notes.anymd" "/vault/books/notes.anymd"');
++});
++
++test('BackupManifestExtension generates archive manifest and verifies checksums', () => {
++  const mockHost = createMockHost();
++  const ext = new BackupManifestExtension();
++  ext.init(mockHost);
++
++  const files = [
++    {
++      path: 'vault/fileA.txt',
++      remote: 'local',
++      remotePath: 'vault/fileA.txt',
++      md5: 'md5_A',
++      size: 100,
++      mtime: '2026-01-01',
++      mimeOrExt: 'txt',
++      tags: []
++    }
++  ];
++
++  const manifest = ext.createBackupManifest(files, 'local', 'koofr:backup');
++  assert.equal(manifest.totalFiles, 1);
++  assert.equal(manifest.files[0].path, 'vault/fileA.txt');
++
++  const verifySuccess = ext.verifyBackup(manifest, files);
++  assert.equal(verifySuccess.verified, true);
++  assert.equal(verifySuccess.matchedCount, 1);
++
++  const verifyFail = ext.verifyBackup(manifest, [
++    { ...files[0], md5: 'corrupted_hash' }
++  ]);
++  assert.equal(verifyFail.verified, false);
++  assert.equal(verifyFail.mismatches.length, 1);
++});
+diff --git a/tsconfig.json b/tsconfig.json
+new file mode 100644
+index 0000000..14c78cc
+--- /dev/null
++++ b/tsconfig.json
+@@ -0,0 +1,18 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "module": "NodeNext",
++    "moduleResolution": "NodeNext",
++    "lib": ["ES2022", "DOM"],
++    "declaration": true,
++    "declarationMap": true,
++    "sourceMap": true,
++    "outDir": "./dist",
++    "rootDir": "./extensions",
++    "strict": true,
++    "esModuleInterop": true,
++    "skipLibCheck": true,
++    "forceConsistentCasingInFileNames": true
++  },
++  "include": ["extensions/**/*"]
++}
+-- 
+2.56.1
+

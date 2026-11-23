@@ -1,0 +1,321 @@
+From 5b9043488370c215e97582d927f9ae84e4cde19b Mon Sep 17 00:00:00 2001
+From: t3hkitty <123781437+t3hkitty@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 19:46:39 +0000
+Subject: [PATCH 10/11] feat(mbb): add vaultr-mbb-telemeowtrics extension with
+ modular scope presets and Markdown telemetry formatter
+
+---
+ extensions/mbb/index.ts  | 199 +++++++++++++++++++++++++++++++++++++++
+ registry/extensions.json |  12 +++
+ tests/mbb.test.mjs       |  70 ++++++++++++++
+ 3 files changed, 281 insertions(+)
+ create mode 100644 extensions/mbb/index.ts
+ create mode 100644 tests/mbb.test.mjs
+
+diff --git a/extensions/mbb/index.ts b/extensions/mbb/index.ts
+new file mode 100644
+index 0000000..a3971f7
+--- /dev/null
++++ b/extensions/mbb/index.ts
+@@ -0,0 +1,199 @@
++import type {
++  IVaultrSubExtension,
++  VaultrExtensionManifest,
++  VaultrExtensionHostApi
++} from '../types.js';
++
++export interface MbbScopePreset {
++  id: string;
++  name: string;
++  scopes: string[];
++  description: string;
++  isSensitive: boolean;
++}
++
++export interface MbbTelemetryPayload {
++  timestamp: string;
++  source: 'google-fit' | 'macrodroid' | 'tasker' | 'manual' | 'telemeowtrics';
++  category: 'fitness' | 'somatic' | 'location' | 'contacts' | 'system';
++  metrics: Record<string, any>;
++  notes?: string;
++  tags?: string[];
++}
++
++export interface MbbScopeStatus {
++  presetId: string;
++  name: string;
++  authorized: boolean;
++  grantedScopes: string[];
++  missingScopes: string[];
++  warningMessage?: string;
++}
++
++export const MBB_AVAILABLE_PRESETS: Record<string, MbbScopePreset> = {
++  base: {
++    id: 'base',
++    name: 'Base Identity',
++    scopes: ['openid', 'email', 'profile'],
++    description: 'Basic account identification and profile metadata.',
++    isSensitive: false
++  },
++  drive_vault: {
++    id: 'drive_vault',
++    name: 'Drive & Vault Staging',
++    scopes: [
++      'https://www.googleapis.com/auth/drive.file',
++      'https://www.googleapis.com/auth/drive.appdata'
++    ],
++    description: 'Read and write AnyMD notes, sidecars, and vault staging archives in Google Drive.',
++    isSensitive: false
++  },
++  mbb_fitness: {
++    id: 'mbb_fitness',
++    name: 'Fitness & Somatics (Google Fit / Health Connect)',
++    scopes: [
++      'https://www.googleapis.com/auth/fitness.activity.read',
++      'https://www.googleapis.com/auth/fitness.body.read',
++      'https://www.googleapis.com/auth/fitness.location.read'
++    ],
++    description: 'Daily steps, heart rate, sleep duration, and active energy for somatic telemetry logs.',
++    isSensitive: true
++  },
++  mbb_location: {
++    id: 'mbb_location',
++    name: 'Timeline & Location Logs',
++    scopes: [
++      'https://www.googleapis.com/auth/fitness.location.read'
++    ],
++    description: 'Geofence transitions and timeline coordinates feeding Telemeowtrics daily logs.',
++    isSensitive: true
++  },
++  mbb_contacts: {
++    id: 'mbb_contacts',
++    name: 'Contacts & People Graph',
++    scopes: [
++      'https://www.googleapis.com/auth/contacts.readonly'
++    ],
++    description: 'CardDAV / Google Contacts context for relationship and communication CRM notes.',
++    isSensitive: true
++  }
++};
++
++export class MbbTelemetryExtension implements IVaultrSubExtension {
++  public manifest: VaultrExtensionManifest = {
++    id: 'vaultr-mbb-telemeowtrics',
++    name: 'MBB Somatic & Telemeowtrics Telemetry Bridge',
++    version: '0.1.0',
++    description: 'Ingests somatic, fitness, location, and contacts telemetry into AnyMD YAML/Markdown notes and meow-vault without external webhooks.',
++    category: 'metadata',
++    author: 't3hkitty',
++    entrypoint: 'extensions/mbb/index.ts',
++    sourceUrl: 'https://github.com/t3hkitty/vaultr/tree/main/extensions/mbb',
++    enabledByDefault: true,
++    capabilities: [
++      'somatic-telemetry-ingest',
++      'scope-status-audit',
++      'markdown-vault-logger',
++      'offline-graceful-degrade'
++    ]
++  };
++
++  private hostApi!: VaultrExtensionHostApi;
++  private authorizedScopes: Set<string> = new Set();
++
++  public init(api: VaultrExtensionHostApi): void {
++    this.hostApi = api;
++    this.hostApi.log({
++      timestamp: new Date().toISOString(),
++      level: 'info',
++      source: 'vaultr:mbb',
++      stage: 'init',
++      message: 'MBB Telemetry & Somatic extension initialized with modular scope presets.'
++    });
++  }
++
++  /**
++   * Sets granted scopes from active token bundle
++   */
++  public setGrantedScopes(scopes: string[] | string): void {
++    const list = Array.isArray(scopes) ? scopes : scopes.split(' ').filter(Boolean);
++    this.authorizedScopes = new Set(list);
++  }
++
++  /**
++   * Checks authorization status across all MBB presets, reporting missing scopes and warnings.
++   */
++  public evaluateScopeStatus(): Record<string, MbbScopeStatus> {
++    const report: Record<string, MbbScopeStatus> = {};
++
++    for (const [key, preset] of Object.entries(MBB_AVAILABLE_PRESETS)) {
++      const granted = preset.scopes.filter(s => this.authorizedScopes.has(s));
++      const missing = preset.scopes.filter(s => !this.authorizedScopes.has(s));
++      const isAuthorized = missing.length === 0;
++
++      let warningMessage: string | undefined;
++      if (!isAuthorized) {
++        warningMessage = preset.isSensitive
++          ? `Module "${preset.name}" is pending consent. For personal/test user setup, authorize via Desktop loopback and click "Advanced -> Go to AnyMD (unsafe)" if unverified.`
++          : `Module "${preset.name}" is not authorized. Missing: ${missing.join(', ')}`;
++      }
++
++      report[key] = {
++        presetId: preset.id,
++        name: preset.name,
++        authorized: isAuthorized,
++        grantedScopes: granted,
++        missingScopes: missing,
++        warningMessage
++      };
++    }
++
++    return report;
++  }
++
++  /**
++   * Transforms raw telemetry (e.g. from MacroDroid / Tasker / Google Fit) into AnyMD Markdown format
++   */
++  public formatTelemetryToMarkdown(payload: MbbTelemetryPayload): { frontmatter: Record<string, any>; body: string } {
++    const nowIso = payload.timestamp || new Date().toISOString();
++    const dateStr = nowIso.split('T')[0];
++
++    const frontmatter: Record<string, any> = {
++      id: `mbb-${dateStr}-${payload.category}`,
++      type: `telemetry/${payload.category}`,
++      source: payload.source,
++      recorded_at: nowIso,
++      vault_zone: 'meow-vault/telemetry',
++      tags: ['mbb', 'telemeowtrics', payload.category, ...(payload.tags || [])],
++      metrics: payload.metrics
++    };
++
++    const bodyLines: string[] = [
++      `# MBB Telemetry: ${payload.category.toUpperCase()} (${dateStr})`,
++      ``,
++      `* **Source:** \`${payload.source}\``,
++      `* **Timestamp:** \`${nowIso}\``,
++      ``,
++      `## Recorded Metrics`,
++      `| Metric | Value |`,
++      `| :--- | :--- |`
++    ];
++
++    for (const [k, v] of Object.entries(payload.metrics)) {
++      bodyLines.push(`| **${k}** | \`${typeof v === 'object' ? JSON.stringify(v) : v}\` |`);
++    }
++
++    if (payload.notes) {
++      bodyLines.push(``, `## Notes & Observations`, payload.notes);
++    }
++
++    return {
++      frontmatter,
++      body: bodyLines.join('\n')
++    };
++  }
++}
++
++export default function createExtension(): IVaultrSubExtension {
++  return new MbbTelemetryExtension();
++}
+diff --git a/registry/extensions.json b/registry/extensions.json
+index 28c6ba1..afb2fb9 100644
+--- a/registry/extensions.json
++++ b/registry/extensions.json
+@@ -134,6 +134,18 @@
+       "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/seedr",
+       "enabledByDefault": true,
+       "capabilities": ["on-demand-stream-resolve", "vlc-m3u8-extvlcopt", "vlc-command-hand-off", "expired-link-refresh", "torbox-tested-provider"]
++    },
++    {
++      "id": "vaultr-mbb-telemeowtrics",
++      "name": "MBB Somatic & Telemeowtrics Telemetry Bridge",
++      "version": "0.1.0",
++      "description": "Ingests somatic, fitness, location, and contacts telemetry into AnyMD YAML/Markdown notes and meow-vault without external webhooks.",
++      "category": "metadata",
++      "author": "t3hkitty",
++      "entrypoint": "https://raw.githubusercontent.com/t3hkitty/vaultr-exts/main/extensions/mbb/index.ts",
++      "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/mbb",
++      "enabledByDefault": true,
++      "capabilities": ["somatic-telemetry-ingest", "scope-status-audit", "markdown-vault-logger", "offline-graceful-degrade"]
+     }
+   ]
+ }
+diff --git a/tests/mbb.test.mjs b/tests/mbb.test.mjs
+new file mode 100644
+index 0000000..1f1c18f
+--- /dev/null
++++ b/tests/mbb.test.mjs
+@@ -0,0 +1,70 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { MbbTelemetryExtension, MBB_AVAILABLE_PRESETS } from '../dist/mbb/index.js';
++
++function createMockHost() {
++  const logs = [];
++  return {
++    log: (entry) => logs.push(entry),
++    getFiles: () => [],
++    getFileByPath: () => undefined,
++    saveSidecar: async () => {},
++    executeRclonePreview: () => {},
++    logs
++  };
++}
++
++test('MbbTelemetryExtension initializes with modular scope presets', () => {
++  const host = createMockHost();
++  const mbb = new MbbTelemetryExtension();
++  mbb.init(host);
++
++  assert.ok(MBB_AVAILABLE_PRESETS.mbb_fitness);
++  assert.ok(MBB_AVAILABLE_PRESETS.mbb_location);
++  assert.ok(MBB_AVAILABLE_PRESETS.mbb_contacts);
++  assert.equal(MBB_AVAILABLE_PRESETS.mbb_fitness.isSensitive, true);
++});
++
++test('MbbTelemetryExtension correctly identifies missing vs granted scopes and warns on sensitive unverified scopes', () => {
++  const host = createMockHost();
++  const mbb = new MbbTelemetryExtension();
++  mbb.init(host);
++
++  // User only granted base + drive
++  mbb.setGrantedScopes([
++    'openid',
++    'email',
++    'profile',
++    'https://www.googleapis.com/auth/drive.file'
++  ]);
++
++  const status = mbb.evaluateScopeStatus();
++  assert.equal(status.base.authorized, true);
++  assert.equal(status.mbb_fitness.authorized, false);
++  assert.ok(status.mbb_fitness.warningMessage.includes('Advanced -> Go to AnyMD (unsafe)'));
++  assert.equal(status.mbb_fitness.missingScopes.length, 3);
++});
++
++test('MbbTelemetryExtension formats somatic telemetry into AnyMD YAML frontmatter and Markdown body', () => {
++  const host = createMockHost();
++  const mbb = new MbbTelemetryExtension();
++  mbb.init(host);
++
++  const formatted = mbb.formatTelemetryToMarkdown({
++    timestamp: '2026-11-23T10:00:00Z',
++    source: 'macrodroid',
++    category: 'fitness',
++    metrics: {
++      steps: 8420,
++      resting_hr: 58,
++      sleep_hours: 7.5
++    },
++    notes: 'Morning walk completed along coastal path.'
++  });
++
++  assert.equal(formatted.frontmatter.id, 'mbb-2026-11-23-fitness');
++  assert.equal(formatted.frontmatter.vault_zone, 'meow-vault/telemetry');
++  assert.equal(formatted.frontmatter.metrics.steps, 8420);
++  assert.ok(formatted.body.includes('| **resting_hr** | `58` |'));
++  assert.ok(formatted.body.includes('Morning walk completed along coastal path.'));
++});
+-- 
+2.56.1
+

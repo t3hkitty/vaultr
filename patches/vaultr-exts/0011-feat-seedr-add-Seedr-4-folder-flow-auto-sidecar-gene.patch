@@ -1,0 +1,243 @@
+From fc6d184df9a0e038fb3a6328fb9be3cbcadec521 Mon Sep 17 00:00:00 2001
+From: t3hkitty <123781437+t3hkitty@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 19:53:16 +0000
+Subject: [PATCH 11/11] feat(seedr): add Seedr 4-folder flow, auto-sidecar
+ generator, and Discord webhook builder
+
+---
+ extensions/seedr/index.ts | 116 ++++++++++++++++++++++++++++++++++++++
+ extensions/seedr/types.ts |  34 ++++++++++-
+ tests/seedr.test.mjs      |  43 ++++++++++++++
+ 3 files changed, 191 insertions(+), 2 deletions(-)
+
+diff --git a/extensions/seedr/index.ts b/extensions/seedr/index.ts
+index 816d77f..b269b4e 100644
+--- a/extensions/seedr/index.ts
++++ b/extensions/seedr/index.ts
+@@ -212,6 +212,122 @@ export class SeedrVlcExtension implements IVaultrSubExtension {
+       description: 'Single-file pull via rclone (tbox:) on demand.'
+     };
+   }
++
++  /**
++   * Plans the Seedr 4-Folder Flow on user button trigger:
++   * 1) Incoming Drop -> 2) Unpack/Staging -> 3) Sidecar-Populated -> 4) Main Vault Destination
++   */
++  public planFourFolderFlow(
++    filename: string,
++    paths: {
++      dropDir: string;
++      stagingDir: string;
++      sidecarReadyDir: string;
++      mainVaultRemote: string;
++    },
++    filesizeBytes = 0
++  ): {
++    flowStages: Array<{ stage: string; path: string; description: string }>;
++    unpackCmd: string;
++    sidecarFilename: string;
++    moveCmd: string;
++  } {
++    const cleanFile = filename.replace(/^[\/\\]+/, '');
++    const dropPath = `${paths.dropDir.replace(/[\/\\]+$/, '')}/${cleanFile}`;
++    const stagingPath = `${paths.stagingDir.replace(/[\/\\]+$/, '')}/${cleanFile}`;
++    const sidecarFilename = `${cleanFile}.anymd`;
++    const sidecarPath = `${paths.sidecarReadyDir.replace(/[\/\\]+$/, '')}/${sidecarFilename}`;
++    const mainVaultDest = `${paths.mainVaultRemote.replace(/[\/\\]+$/, '')}/${cleanFile}`;
++
++    const flowStages = [
++      { stage: '1_drop', path: dropPath, description: 'Seedr / seedbox drop folder (incoming payload)' },
++      { stage: '2_staging', path: stagingPath, description: 'Unpack & working staging space (guarded by quota checks)' },
++      { stage: '3_sidecar_ready', path: sidecarPath, description: 'Auto-populated AnyMD YAML sidecar folder' },
++      { stage: '4_main_vault', path: mainVaultDest, description: 'Largest cloud / permanent vault destination' }
++    ];
++
++    const isArchive = ['zip', 'rar', '7z', 'tar'].some(ext => cleanFile.toLowerCase().endsWith(ext));
++    const unpackCmd = isArchive
++      ? `7z x "${dropPath}" -o"${paths.stagingDir}" -y`
++      : `cp "${dropPath}" "${stagingPath}"`;
++
++    const moveCmd = `rclone moveto "${stagingPath}" "${mainVaultDest}" --checksum`;
++
++    return {
++      flowStages,
++      unpackCmd,
++      sidecarFilename,
++      moveCmd
++    };
++  }
++
++  /**
++   * Builds an automatic AnyMD YAML sidecar metadata string for seedbox items
++   */
++  public generateSeedboxSidecarYaml(item: {
++    filename: string;
++    sizeBytes: number;
++    md5?: string;
++    provider?: string;
++    downloadUrl?: string;
++    tags?: string[];
++  }): string {
++    const nowIso = new Date().toISOString();
++    const provider = item.provider || 'torbox';
++    const cleanExt = item.filename.includes('.') ? item.filename.split('.').pop()?.toLowerCase() : 'bin';
++
++    return [
++      '---',
++      `id: seedbox-${Date.now()}`,
++      `path: "${item.filename}"`,
++      `size_bytes: ${item.sizeBytes}`,
++      `md5: "${item.md5 || ''}"`,
++      `ext: "${cleanExt}"`,
++      `backend: "${provider}"`,
++      `added_at: "${nowIso}"`,
++      `ingest_source: "seedbox"`,
++      `fetch_status: "ready_to_import"`,
++      `vault_zone: "meow-vault/incoming"`,
++      `tags: ${JSON.stringify(['seedbox', provider, cleanExt, ...(item.tags || [])])}`,
++      '---',
++      `# ${item.filename}`,
++      `Ingested via Seedr 4-folder pipeline (${provider}).`,
++      `Ready for Kittlibr import or VLC streaming.`
++    ].join('\n');
++  }
++
++  /**
++   * Generates a Discord webhook notification payload when files are sidecar-ready
++   */
++  public buildDiscordNotification(
++    filename: string,
++    sizeBytes: number,
++    readyCount: number,
++    statusText = 'Files ready to import'
++  ): {
++    content: string;
++    embeds: Array<Record<string, any>>;
++  } {
++    const sizeMb = (sizeBytes / (1024 * 1024)).toFixed(1);
++    return {
++      content: `🐾 **Vaultr / Kittlibr Notification:** ${statusText}!`,
++      embeds: [
++        {
++          title: `📥 Sidecar Ready: ${filename}`,
++          description: `Automatically indexed and sidecar-populated in Seedr 4-Folder Flow.`,
++          color: 0x3182ce, // Vaultr Blue
++          fields: [
++            { name: 'File', value: `\`${filename}\``, inline: true },
++            { name: 'Size', value: `\`${sizeMb} MB\``, inline: true },
++            { name: 'Batch Ready', value: `\`${readyCount} items\``, inline: true },
++            { name: 'Status', value: 'Ready for Kittlibr / VLC handoff', inline: false }
++          ],
++          footer: { text: `AnyMD / Vaultr Seedr Bridge • ${new Date().toLocaleTimeString()}` },
++          timestamp: new Date().toISOString()
++        }
++      ]
++    };
++  }
+ }
+ 
+ export default function createExtension(): IVaultrSubExtension {
+diff --git a/extensions/seedr/types.ts b/extensions/seedr/types.ts
+index 20ce5cf..a3ab439 100644
+--- a/extensions/seedr/types.ts
++++ b/extensions/seedr/types.ts
+@@ -11,7 +11,7 @@ export interface ResolvedStreamInfo {
+   provider: DebridProvider;
+   resolvedAt: string;
+   expiresInSeconds?: number;
+-  testedStatus: string; // e.g. "verified (TorBox)" | "untested (Seedr - only TorBox tested due to tool access)"
++  testedStatus: string;
+   isDirectStreamable: boolean;
+ }
+ 
+@@ -19,5 +19,35 @@ export interface VlcPlaylistItem {
+   title: string;
+   streamUrl: string;
+   durationSeconds?: number;
+-  vlcOptions?: string[]; // e.g. [":network-caching=3000", ":http-user-agent=VaultrVlcBridge"]
++  vlcOptions?: string[];
++}
++
++export interface SeedrFourFolderPipelinePaths {
++  folder1_incoming_drop: string;     // Seedr/seedbox drop folder
++  folder2_unpack_staging: string;    // Unpack & working staging space
++  folder3_sidecar_ready: string;     // Sidecar-populated folder (.anymd generated)
++  folder4_main_vault: string;        // Main vault / largest cloud destination
++}
++
++export interface SeedrPipelineProgress {
++  pipelineId: string;
++  stage: 'drop' | 'unpack' | 'sidecar_gen' | 'vault_move' | 'cleaned' | 'failed';
++  currentFile?: string;
++  sidecarGenerated: boolean;
++  destinationVerified: boolean;
++  discordNotified: boolean;
++  timestamp: string;
++  error?: string;
++}
++
++export interface DiscordNotificationPayload {
++  content?: string;
++  embeds?: Array<{
++    title: string;
++    description: string;
++    color: number;
++    fields?: Array<{ name: string; value: string; inline?: boolean }>;
++    footer?: { text: string };
++    timestamp?: string;
++  }>;
+ }
+diff --git a/tests/seedr.test.mjs b/tests/seedr.test.mjs
+index 49d4f77..d96bbf4 100644
+--- a/tests/seedr.test.mjs
++++ b/tests/seedr.test.mjs
+@@ -132,3 +132,46 @@ test('SeedrVlcExtension builds CLI launch command and detects archive fallback',
+   const expiredFallback = ext.determineStreamFallback(singleFile, 'expired');
+   assert.equal(expiredFallback.fallbackAction, 'refresh_link');
+ });
++
++test('SeedrVlcExtension plans 4-folder flow, generates auto-sidecar YAML, and builds Discord webhook', () => {
++  const host = createMockHost();
++  const ext = new SeedrVlcExtension();
++  ext.init(host);
++
++  // 1. 4-Folder Flow Plan
++  const plan = ext.planFourFolderFlow('season_pack.zip', {
++    dropDir: '/seedr/drop',
++    stagingDir: '/seedr/staging',
++    sidecarReadyDir: '/seedr/sidecar_ready',
++    mainVaultRemote: 'koofr:vault'
++  });
++
++  assert.equal(plan.flowStages.length, 4);
++  assert.equal(plan.flowStages[0].stage, '1_drop');
++  assert.equal(plan.flowStages[1].stage, '2_staging');
++  assert.equal(plan.flowStages[2].stage, '3_sidecar_ready');
++  assert.equal(plan.flowStages[3].stage, '4_main_vault');
++  assert.ok(plan.unpackCmd.includes('7z x "/seedr/drop/season_pack.zip"'));
++  assert.equal(plan.sidecarFilename, 'season_pack.zip.anymd');
++  assert.ok(plan.moveCmd.includes('rclone moveto'));
++
++  // 2. Auto-Sidecar YAML generation
++  const yaml = ext.generateSeedboxSidecarYaml({
++    filename: 'book_audio.mp3',
++    sizeBytes: 15000000,
++    md5: 'deadbeef123',
++    provider: 'torbox'
++  });
++  assert.ok(yaml.includes('path: "book_audio.mp3"'));
++  assert.ok(yaml.includes('fetch_status: "ready_to_import"'));
++  assert.ok(yaml.includes('ingest_source: "seedbox"'));
++  assert.ok(yaml.includes('size_bytes: 15000000'));
++
++  // 3. Discord Notification builder
++  const discord = ext.buildDiscordNotification('book_audio.mp3', 15000000, 3);
++  assert.ok(discord.content.includes('Vaultr / Kittlibr Notification'));
++  assert.equal(discord.embeds[0].title, '📥 Sidecar Ready: book_audio.mp3');
++  assert.equal(discord.embeds[0].fields[0].value, '`book_audio.mp3`');
++  assert.equal(discord.embeds[0].color, 0x3182ce);
++});
++
+-- 
+2.56.1
+

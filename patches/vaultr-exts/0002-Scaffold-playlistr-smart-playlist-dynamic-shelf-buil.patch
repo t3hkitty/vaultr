@@ -1,0 +1,578 @@
+From 046597c8e246904acfbf71190b915d984b4ba048 Mon Sep 17 00:00:00 2001
+From: t3hkitty <123781437+t3hkitty@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 04:52:59 +0000
+Subject: [PATCH 02/11] Scaffold playlistr smart-playlist dynamic shelf builder
+ extension with m3u8, sidecars, and rclone prefetch
+
+---
+ extensions/index.ts           |   1 +
+ extensions/playlistr/index.ts | 298 ++++++++++++++++++++++++++++++++++
+ extensions/playlistr/types.ts |  42 +++++
+ registry/extensions.json      |  12 ++
+ tests/playlistr.test.mjs      | 168 +++++++++++++++++++
+ 5 files changed, 521 insertions(+)
+ create mode 100644 extensions/playlistr/index.ts
+ create mode 100644 extensions/playlistr/types.ts
+ create mode 100644 tests/playlistr.test.mjs
+
+diff --git a/extensions/index.ts b/extensions/index.ts
+index 1a3f4d2..1480d18 100644
+--- a/extensions/index.ts
++++ b/extensions/index.ts
+@@ -5,3 +5,4 @@ export * from './tagger/index.js';
+ export * from './kittlibr/index.js';
+ export * from './backup/index.js';
+ export * from './dedupe/index.js';
++export * from './playlistr/index.js';
+diff --git a/extensions/playlistr/index.ts b/extensions/playlistr/index.ts
+new file mode 100644
+index 0000000..7622eb0
+--- /dev/null
++++ b/extensions/playlistr/index.ts
+@@ -0,0 +1,298 @@
++import type {
++  IVaultrSubExtension,
++  VaultrExtensionManifest,
++  VaultrExtensionHostApi,
++  VaultrFileMetadata
++} from '../types.js';
++import type {
++  PlaylistRuleDefinition,
++  PlaylistRuleCondition,
++  ResolvedPlaylistItem,
++  SmartPlaylistRecord,
++  FetchStatus
++} from './types.js';
++
++export class PlaylistrExtension implements IVaultrSubExtension {
++  public manifest: VaultrExtensionManifest = {
++    id: 'vaultr-playlistr',
++    name: 'Playlistr Dynamic-Shelf Playlist Builder',
++    version: '0.1.0',
++    description: 'Generates smart audio/video playlists from .anymd sidecars using Kittlibr-style dynamic shelf rules, exporting to .m3u8, HTML5 queues, and rclone --files-from prefetch.',
++    category: 'organizer',
++    author: 't3hkitty',
++    entrypoint: 'extensions/playlistr/index.ts',
++    sourceUrl: 'https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/playlistr',
++    enabledByDefault: true,
++    capabilities: [
++      'dynamic-shelf-evaluation',
++      'm3u8-export',
++      'anymd-playlist-sidecar',
++      'rclone-files-from-prefetch',
++      'html5-queue-bridge'
++    ]
++  };
++
++  private hostApi!: VaultrExtensionHostApi;
++
++  public init(api: VaultrExtensionHostApi): void {
++    this.hostApi = api;
++    this.hostApi.log({
++      timestamp: new Date().toISOString(),
++      level: 'info',
++      source: 'vaultr:playlistr',
++      stage: 'init',
++      message: 'Playlistr Dynamic-Shelf Playlist extension initialized.'
++    });
++  }
++
++  /**
++   * Evaluates dynamic shelf rules against indexed .anymd sidecars without touching live drives
++   */
++  public evaluateRules(files: VaultrFileMetadata[], rule: PlaylistRuleDefinition): ResolvedPlaylistItem[] {
++    const matchedFiles: VaultrFileMetadata[] = [];
++
++    for (const file of files) {
++      const isMatch = this.matchesConditions(file, rule.conditions, rule.matchType);
++      if (isMatch) {
++        matchedFiles.push(file);
++      }
++    }
++
++    // Sort
++    if (rule.sortBy === 'random') {
++      matchedFiles.sort(() => Math.random() - 0.5);
++    } else {
++      matchedFiles.sort((a, b) => {
++        let valA = '';
++        let valB = '';
++
++        if (rule.sortBy === 'artist') {
++          valA = String((a.custom?.artist as string) || (a.custom?.author as string) || '');
++          valB = String((b.custom?.artist as string) || (b.custom?.author as string) || '');
++        } else if (rule.sortBy === 'mtime') {
++          valA = a.mtime || '';
++          valB = b.mtime || '';
++        } else if (rule.sortBy === 'size') {
++          return (rule.sortOrder === 'desc' ? -1 : 1) * (a.size - b.size);
++        } else {
++          // Default: path / title
++          valA = a.path;
++          valB = b.path;
++        }
++
++        const cmp = valA.localeCompare(valB);
++        return rule.sortOrder === 'desc' ? -cmp : cmp;
++      });
++    }
++
++    // Apply max limit
++    const sliced = rule.maxTracks && rule.maxTracks > 0 ? matchedFiles.slice(0, rule.maxTracks) : matchedFiles;
++
++    const resolved: ResolvedPlaylistItem[] = sliced.map(f => {
++      const filename = f.path.split(/[\/\\]/).pop() || 'Track';
++      const cleanTitle = filename.replace(/\.[^/.]+$/, '');
++      const fetchStatus: FetchStatus = f.remote.toLowerCase() === 'local' ? 'cached-local' : 'indexed-only';
++
++      return {
++        id: f.md5 || f.path,
++        title: String(f.custom?.title || cleanTitle),
++        artist: (f.custom?.artist as string) || (f.custom?.author as string),
++        album: (f.custom?.album as string) || (f.custom?.series as string),
++        durationSeconds: Number(f.custom?.duration) || undefined,
++        path: f.path,
++        remote: f.remote,
++        remotePath: f.remotePath,
++        fetchStatus,
++        mimeOrExt: f.mimeOrExt,
++        size: f.size
++      };
++    });
++
++    this.hostApi.log({
++      timestamp: new Date().toISOString(),
++      level: 'info',
++      source: 'vaultr:playlistr',
++      stage: 'shelf-eval',
++      message: `Dynamic shelf "${rule.name}" resolved ${resolved.length} tracks.`,
++      meta: { ruleId: rule.id, count: resolved.length }
++    });
++
++    return resolved;
++  }
++
++  private matchesConditions(
++    file: VaultrFileMetadata,
++    conditions: PlaylistRuleCondition[],
++    matchType: 'AND' | 'OR'
++  ): boolean {
++    if (!conditions || conditions.length === 0) return true;
++
++    for (const cond of conditions) {
++      const res = this.evalSingleCondition(file, cond);
++      if (matchType === 'AND' && !res) return false;
++      if (matchType === 'OR' && res) return true;
++    }
++
++    return matchType === 'AND';
++  }
++
++  private evalSingleCondition(file: VaultrFileMetadata, cond: PlaylistRuleCondition): boolean {
++    let actualValue = '';
++    let actualList: string[] = [];
++
++    switch (cond.field) {
++      case 'ext':
++      case 'mime':
++        actualValue = (file.mimeOrExt || file.path.split('.').pop() || '').toLowerCase();
++        break;
++      case 'tags':
++        actualList = (file.tags || []).map(t => t.toLowerCase());
++        break;
++      case 'artist':
++        actualValue = String(file.custom?.artist || file.custom?.author || '').toLowerCase();
++        break;
++      case 'album':
++        actualValue = String(file.custom?.album || file.custom?.series || '').toLowerCase();
++        break;
++      case 'vault_zone':
++      case 'backend':
++        actualValue = (file.remote || '').toLowerCase();
++        break;
++      case 'fetch_status':
++        actualValue = file.remote.toLowerCase() === 'local' ? 'cached-local' : 'indexed-only';
++        break;
++      case 'path':
++        actualValue = file.path.toLowerCase();
++        break;
++    }
++
++    const expectedVal = Array.isArray(cond.value)
++      ? cond.value.map(v => v.toLowerCase())
++      : cond.value.toLowerCase();
++
++    if (cond.operator === 'equals') {
++      return actualValue === expectedVal;
++    }
++    if (cond.operator === 'contains') {
++      return actualValue.includes(expectedVal as string);
++    }
++    if (cond.operator === 'in') {
++      const arr = Array.isArray(expectedVal) ? expectedVal : [expectedVal];
++      if (cond.field === 'tags') {
++        return arr.some(v => actualList.includes(v));
++      }
++      return arr.includes(actualValue);
++    }
++    if (cond.operator === 'not-in') {
++      const arr = Array.isArray(expectedVal) ? expectedVal : [expectedVal];
++      if (cond.field === 'tags') {
++        return !arr.some(v => actualList.includes(v));
++      }
++      return !arr.includes(actualValue);
++    }
++    if (cond.operator === 'matches') {
++      try {
++        const re = new RegExp(expectedVal as string, 'i');
++        return re.test(actualValue);
++      } catch {
++        return false;
++      }
++    }
++
++    return false;
++  }
++
++  /**
++   * Generates standard extended M3U8 string compatible with VLC on Windows and Android
++   */
++  public generateM3u8(playlistName: string, items: ResolvedPlaylistItem[], options: { prefixPath?: string } = {}): string {
++    const lines = ['#EXTM3U', `#PLAYLIST:${playlistName}`];
++
++    for (const item of items) {
++      const duration = item.durationSeconds ?? -1;
++      const artist = item.artist ? `${item.artist} - ` : '';
++      lines.push(`#EXTINF:${duration},${artist}${item.title}`);
++
++      // Path format: local path or mounted drive path
++      let fileUri = item.path;
++      if (options.prefixPath) {
++        fileUri = `${options.prefixPath.replace(/\/$/, '')}/${item.path.replace(/^\//, '')}`;
++      }
++      lines.push(fileUri);
++    }
++
++    return lines.join('\n');
++  }
++
++  /**
++   * Generates a flat .anymd YAML frontmatter file preserving rule definition and resolved tracks
++   */
++  public generatePlaylistSidecar(rule: PlaylistRuleDefinition, items: ResolvedPlaylistItem[]): string {
++    const totalBytes = items.reduce((acc, it) => acc + (it.size || 0), 0);
++
++    const record: SmartPlaylistRecord = {
++      rule,
++      generatedAt: new Date().toISOString(),
++      totalTracks: items.length,
++      totalBytes,
++      items
++    };
++
++    const lines: string[] = ['---'];
++    lines.push(`id: "${rule.id}"`);
++    lines.push(`name: "${rule.name}"`);
++    lines.push(`type: smart-playlist`);
++    lines.push(`generatedAt: "${record.generatedAt}"`);
++    lines.push(`totalTracks: ${items.length}`);
++    lines.push(`totalBytes: ${totalBytes}`);
++    lines.push('rule:');
++    lines.push(`  matchType: ${rule.matchType}`);
++    lines.push(`  sortBy: ${rule.sortBy || 'title'}`);
++    lines.push(`  sortOrder: ${rule.sortOrder || 'asc'}`);
++    lines.push('  conditions:');
++    for (const c of rule.conditions) {
++      lines.push(`    - field: ${c.field}`);
++      lines.push(`      operator: ${c.operator}`);
++      lines.push(`      value: ${JSON.stringify(c.value)}`);
++    }
++    lines.push('---');
++    lines.push('');
++    lines.push(`# Smart Playlist: ${rule.name}`);
++    lines.push(`*Generated from .anymd sidecars across active vaults.*`);
++    lines.push('');
++    lines.push('| # | Title | Artist / Creator | Remote | Status | Size |');
++    lines.push('|---|-------|------------------|--------|--------|------|');
++
++    items.forEach((it, idx) => {
++      lines.push(`| ${idx + 1} | ${it.title} | ${it.artist || '-'} | \`${it.remote}\` | ${it.fetchStatus} | ${it.size} |`);
++    });
++
++    return lines.join('\n');
++  }
++
++  /**
++   * Generates an rclone --files-from manifest list to pull down any indexed-only remote tracks
++   */
++  public generateRcloneFilesFromManifest(
++    items: ResolvedPlaylistItem[],
++    targetRemote?: string
++  ): { manifestLines: string[]; commandPreview: string } {
++    const remoteItems = items.filter(it => it.fetchStatus === 'indexed-only');
++    const filtered = targetRemote
++      ? remoteItems.filter(it => it.remote.toLowerCase() === targetRemote.toLowerCase())
++      : remoteItems;
++
++    const manifestLines = filtered.map(it => it.remotePath || it.path);
++    const remoteSource = targetRemote || (filtered[0]?.remote || 'koofr:');
++    const commandPreview = `rclone copy "${remoteSource}" "local:cached_playlists" --files-from="playlist_fetch_list.txt" --no-traverse --dry-run`;
++
++    return {
++      manifestLines,
++      commandPreview
++    };
++  }
++}
++
++export default function createExtension(): IVaultrSubExtension {
++  return new PlaylistrExtension();
++}
+diff --git a/extensions/playlistr/types.ts b/extensions/playlistr/types.ts
+new file mode 100644
+index 0000000..90f4780
+--- /dev/null
++++ b/extensions/playlistr/types.ts
+@@ -0,0 +1,42 @@
++import type { VaultrFileMetadata } from '../types.js';
++
++export type FetchStatus = 'cached-local' | 'indexed-only' | 'syncing' | 'failed';
++
++export interface PlaylistRuleCondition {
++  field: 'ext' | 'mime' | 'tags' | 'artist' | 'album' | 'vault_zone' | 'backend' | 'fetch_status' | 'path';
++  operator: 'equals' | 'contains' | 'in' | 'not-in' | 'matches';
++  value: string | string[];
++}
++
++export interface PlaylistRuleDefinition {
++  id: string;
++  name: string;
++  description?: string;
++  matchType: 'AND' | 'OR';
++  conditions: PlaylistRuleCondition[];
++  sortBy?: 'title' | 'artist' | 'mtime' | 'size' | 'random';
++  sortOrder?: 'asc' | 'desc';
++  maxTracks?: number; // Optional limit (e.g. 50 or 100)
++}
++
++export interface ResolvedPlaylistItem {
++  id: string;
++  title: string;
++  artist?: string;
++  album?: string;
++  durationSeconds?: number;
++  path: string;
++  remote: string;
++  remotePath: string;
++  fetchStatus: FetchStatus;
++  mimeOrExt: string;
++  size: number;
++}
++
++export interface SmartPlaylistRecord {
++  rule: PlaylistRuleDefinition;
++  generatedAt: string;
++  totalTracks: number;
++  totalBytes: number;
++  items: ResolvedPlaylistItem[];
++}
+diff --git a/registry/extensions.json b/registry/extensions.json
+index b054258..b854809 100644
+--- a/registry/extensions.json
++++ b/registry/extensions.json
+@@ -74,6 +74,18 @@
+       "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/dedupe",
+       "enabledByDefault": true,
+       "capabilities": ["md5-deduplication", "quarantine-preview", "safe-resolution"]
++    },
++    {
++      "id": "vaultr-playlistr",
++      "name": "Playlistr Dynamic-Shelf Playlist Builder",
++      "version": "0.1.0",
++      "description": "Generates smart audio/video playlists from .anymd sidecars using Kittlibr-style dynamic shelf rules, exporting to .m3u8, HTML5 queues, and rclone --files-from prefetch.",
++      "category": "organizer",
++      "author": "t3hkitty",
++      "entrypoint": "https://raw.githubusercontent.com/t3hkitty/vaultr-exts/main/extensions/playlistr/index.ts",
++      "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/playlistr",
++      "enabledByDefault": true,
++      "capabilities": ["dynamic-shelf-evaluation", "m3u8-export", "anymd-playlist-sidecar", "rclone-files-from-prefetch", "html5-queue-bridge"]
+     }
+   ]
+ }
+diff --git a/tests/playlistr.test.mjs b/tests/playlistr.test.mjs
+new file mode 100644
+index 0000000..2d80ee0
+--- /dev/null
++++ b/tests/playlistr.test.mjs
+@@ -0,0 +1,168 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { PlaylistrExtension } from '../dist/playlistr/index.js';
++
++function createMockHost() {
++  const logs = [];
++  return {
++    log: (entry) => logs.push(entry),
++    getFiles: () => [],
++    getFileByPath: () => undefined,
++    saveSidecar: async () => {},
++    executeRclonePreview: () => {},
++    logs
++  };
++}
++
++test('PlaylistrExtension evaluates dynamic shelf conditions without live disk access', () => {
++  const host = createMockHost();
++  const ext = new PlaylistrExtension();
++  ext.init(host);
++
++  const indexedFiles = [
++    {
++      path: 'music/synthwave/track1.mp3',
++      remote: 'local',
++      remotePath: 'music/synthwave/track1.mp3',
++      md5: 'md5_1',
++      size: 5000000,
++      mtime: '2026-05-01',
++      mimeOrExt: 'mp3',
++      tags: ['synthwave', 'instrumental'],
++      custom: { title: 'Neon Horizon', artist: 'Lazerhawk', album: 'Redline' }
++    },
++    {
++      path: 'music/rock/song2.flac',
++      remote: 'koofr:',
++      remotePath: 'FLACs/song2.flac',
++      md5: 'md5_2',
++      size: 30000000,
++      mtime: '2026-05-02',
++      mimeOrExt: 'flac',
++      tags: ['rock'],
++      custom: { title: 'Stone Age', artist: 'Queens', album: 'Songs' }
++    },
++    {
++      path: 'docs/manual.pdf',
++      remote: 'local',
++      remotePath: 'docs/manual.pdf',
++      md5: 'md5_3',
++      size: 200000,
++      mtime: '2026-05-03',
++      mimeOrExt: 'pdf',
++      tags: ['docs']
++    }
++  ];
++
++  const rule = {
++    id: 'shelf-synthwave',
++    name: 'Synthwave Classics',
++    matchType: 'AND',
++    conditions: [
++      { field: 'ext', operator: 'in', value: ['mp3', 'flac'] },
++      { field: 'tags', operator: 'in', value: ['synthwave'] }
++    ],
++    sortBy: 'title',
++    sortOrder: 'asc'
++  };
++
++  const playlist = ext.evaluateRules(indexedFiles, rule);
++  assert.equal(playlist.length, 1);
++  assert.equal(playlist[0].title, 'Neon Horizon');
++  assert.equal(playlist[0].artist, 'Lazerhawk');
++  assert.equal(playlist[0].fetchStatus, 'cached-local');
++});
++
++test('PlaylistrExtension generates valid VLC-compatible .m3u8 playlist', () => {
++  const host = createMockHost();
++  const ext = new PlaylistrExtension();
++  ext.init(host);
++
++  const items = [
++    {
++      id: 'track1',
++      title: 'Track One',
++      artist: 'Artist A',
++      album: 'Album 1',
++      durationSeconds: 180,
++      path: 'Z:/Music/track1.mp3',
++      remote: 'Z:',
++      remotePath: 'Music/track1.mp3',
++      fetchStatus: 'indexed-only',
++      mimeOrExt: 'mp3',
++      size: 4000000
++    }
++  ];
++
++  const m3u8 = ext.generateM3u8('My Chill Mix', items);
++  assert.ok(m3u8.startsWith('#EXTM3U\n#PLAYLIST:My Chill Mix'));
++  assert.ok(m3u8.includes('#EXTINF:180,Artist A - Track One'));
++  assert.ok(m3u8.includes('Z:/Music/track1.mp3'));
++});
++
++test('PlaylistrExtension generates flat .anymd YAML sidecar for smart playlist persistence', () => {
++  const host = createMockHost();
++  const ext = new PlaylistrExtension();
++  ext.init(host);
++
++  const rule = {
++    id: 'shelf-favs',
++    name: 'Favorite Tracks',
++    matchType: 'AND',
++    conditions: [{ field: 'ext', operator: 'equals', value: 'mp3' }]
++  };
++
++  const items = [
++    {
++      id: 'item1',
++      title: 'Favorite Song',
++      artist: 'Singer',
++      path: 'songs/fav.mp3',
++      remote: 'local',
++      remotePath: 'songs/fav.mp3',
++      fetchStatus: 'cached-local',
++      mimeOrExt: 'mp3',
++      size: 5000000
++    }
++  ];
++
++  const sidecar = ext.generatePlaylistSidecar(rule, items);
++  assert.ok(sidecar.startsWith('---\nid: "shelf-favs"'));
++  assert.ok(sidecar.includes('type: smart-playlist'));
++  assert.ok(sidecar.includes('# Smart Playlist: Favorite Tracks'));
++  assert.ok(sidecar.includes('| 1 | Favorite Song | Singer | `local` | cached-local | 5000000 |'));
++});
++
++test('PlaylistrExtension outputs rclone --files-from manifest for remote track pre-fetch', () => {
++  const host = createMockHost();
++  const ext = new PlaylistrExtension();
++  ext.init(host);
++
++  const items = [
++    {
++      id: 'local1',
++      title: 'Local',
++      path: 'music/local.mp3',
++      remote: 'local',
++      remotePath: 'music/local.mp3',
++      fetchStatus: 'cached-local',
++      mimeOrExt: 'mp3',
++      size: 1000
++    },
++    {
++      id: 'remote1',
++      title: 'Cloud Track',
++      path: 'koofr:/audio/cloud.mp3',
++      remote: 'koofr:',
++      remotePath: 'audio/cloud.mp3',
++      fetchStatus: 'indexed-only',
++      mimeOrExt: 'mp3',
++      size: 6000000
++    }
++  ];
++
++  const { manifestLines, commandPreview } = ext.generateRcloneFilesFromManifest(items, 'koofr:');
++  assert.equal(manifestLines.length, 1);
++  assert.equal(manifestLines[0], 'audio/cloud.mp3');
++  assert.ok(commandPreview.includes('rclone copy "koofr:" "local:cached_playlists" --files-from="playlist_fetch_list.txt" --no-traverse --dry-run'));
++});
+-- 
+2.56.1
+

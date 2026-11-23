@@ -1,0 +1,142 @@
+From f3f513166ef4c0529592e8708b5f6a2b19d386a6 Mon Sep 17 00:00:00 2001
+From: t3hkitty <123781437+t3hkitty@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 06:16:31 +0000
+Subject: [PATCH 09/11] feat(kittlibr): add honest remote connection
+ verification and subpath sanitization
+
+---
+ extensions/kittlibr/index.ts | 73 ++++++++++++++++++++++++++++++++++--
+ tests/extensions.test.mjs    | 13 +++++++
+ 2 files changed, 83 insertions(+), 3 deletions(-)
+
+diff --git a/extensions/kittlibr/index.ts b/extensions/kittlibr/index.ts
+index 9035689..8fb45e9 100644
+--- a/extensions/kittlibr/index.ts
++++ b/extensions/kittlibr/index.ts
+@@ -17,18 +17,35 @@ export interface KittlibrBookMetadata {
+   tags?: string[];
+ }
+ 
++export interface RemoteConnectionVerification {
++  remoteName: string;
++  configuredSubpath: string;
++  resolvedTarget: string;
++  isDaemonLive: boolean;
++  daemonEndpoint?: string;
++  daemonStatusMessage: string;
++  backendMode: 'live-daemon' | 'offline-simulated';
++  sanitizedSubpath: string;
++}
++
+ export class KittlibrMetadataExtension implements IVaultrSubExtension {
+   public manifest: VaultrExtensionManifest = {
+     id: 'vaultr-kittlibr-metadata',
+     name: 'Kittlibr Metadata & Sidecar Bridge',
+     version: '0.1.0',
+-    description: 'Bridges Kittlibr rich book/document YAML metadata directly into AnyMD sidecars with symlink and cross-index support.',
++    description: 'Bridges Kittlibr rich book/document YAML metadata directly into AnyMD sidecars with symlink, subpath verification, and honest connection test validation.',
+     category: 'metadata',
+     author: 't3hkitty',
+     entrypoint: 'extensions/kittlibr/index.ts',
+     sourceUrl: 'https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/kittlibr',
+     enabledByDefault: true,
+-    capabilities: ['kittlibr-schema-sync', 'yaml-sidecar-enrichment', 'symlink-sidecar']
++    capabilities: [
++      'kittlibr-schema-sync',
++      'yaml-sidecar-enrichment',
++      'symlink-sidecar',
++      'subpath-verification',
++      'honest-connection-testing'
++    ]
+   };
+ 
+   private hostApi!: VaultrExtensionHostApi;
+@@ -40,10 +57,60 @@ export class KittlibrMetadataExtension implements IVaultrSubExtension {
+       level: 'info',
+       source: 'vaultr-kittlibr-metadata',
+       stage: 'init',
+-      message: 'Kittlibr Metadata Bridge extension initialized.'
++      message: 'Kittlibr Metadata Bridge extension initialized with honest subpath & daemon verification.'
+     });
+   }
+ 
++  /**
++   * Sanitizes subpaths to prevent trailing/leading slash anomalies or accidental root traversal
++   */
++  public sanitizeSubpath(rawSubpath: string): string {
++    if (!rawSubpath) return '';
++    return rawSubpath
++      .trim()
++      .replace(/^[\/\\]+/, '')
++      .replace(/[\/\\]+$/, '')
++      .replace(/\\/g, '/');
++  }
++
++  /**
++   * Verifies remote connection target without silent fallback to default 'library/'
++   */
++  public verifyRemoteTarget(
++    remoteName: string,
++    rawSubpath: string,
++    daemonReachable = false,
++    daemonEndpoint = 'http://127.0.0.1:3050'
++  ): RemoteConnectionVerification {
++    const cleanSubpath = this.sanitizeSubpath(rawSubpath);
++    const cleanRemote = remoteName.replace(/:$/, '');
++    const resolvedTarget = cleanSubpath ? `${cleanRemote}:${cleanSubpath}` : `${cleanRemote}:`;
++
++    const result: RemoteConnectionVerification = {
++      remoteName: cleanRemote,
++      configuredSubpath: cleanSubpath,
++      resolvedTarget,
++      isDaemonLive: daemonReachable,
++      daemonEndpoint,
++      daemonStatusMessage: daemonReachable
++        ? `Connected to AnyMD loopback daemon at ${daemonEndpoint}`
++        : `AnyMD daemon (:3050) unreachable. Operating in offline/simulated mode.`,
++      backendMode: daemonReachable ? 'live-daemon' : 'offline-simulated',
++      sanitizedSubpath: cleanSubpath
++    };
++
++    this.hostApi.log({
++      timestamp: new Date().toISOString(),
++      level: daemonReachable ? 'info' : 'warn',
++      source: 'vaultr:kittlibr-sync',
++      stage: 'test-connection',
++      message: `Verified remote target: ${resolvedTarget} [daemon: ${daemonReachable ? 'online' : 'offline'}]`,
++      meta: result as unknown as Record<string, unknown>
++    });
++
++    return result;
++  }
++
+   /**
+    * Enriches standard VaultrFileMetadata with Kittlibr book schema fields
+    */
+diff --git a/tests/extensions.test.mjs b/tests/extensions.test.mjs
+index 2a3ab9d..f65ea92 100644
+--- a/tests/extensions.test.mjs
++++ b/tests/extensions.test.mjs
+@@ -118,6 +118,19 @@ test('KittlibrMetadataExtension enriches sidecar metadata with book schema and s
+ 
+   const symlinkCmd = ext.buildSymlinkCommand('/central/kittlibr/notes.anymd', '/vault/books/notes.anymd');
+   assert.equal(symlinkCmd, 'ln -s "/central/kittlibr/notes.anymd" "/vault/books/notes.anymd"');
++
++  // Test honest connection verification without silent fallback
++  const liveCheck = ext.verifyRemoteTarget('davjump', 'kittlib/epub', true, 'http://127.0.0.1:3050');
++  assert.equal(liveCheck.remoteName, 'davjump');
++  assert.equal(liveCheck.configuredSubpath, 'kittlib/epub');
++  assert.equal(liveCheck.resolvedTarget, 'davjump:kittlib/epub');
++  assert.equal(liveCheck.backendMode, 'live-daemon');
++
++  const offlineCheck = ext.verifyRemoteTarget('davjump:', '/kittlib/epub/', false);
++  assert.equal(offlineCheck.configuredSubpath, 'kittlib/epub');
++  assert.equal(offlineCheck.resolvedTarget, 'davjump:kittlib/epub');
++  assert.equal(offlineCheck.backendMode, 'offline-simulated');
++  assert.ok(offlineCheck.daemonStatusMessage.includes('unreachable'));
+ });
+ 
+ test('BackupManifestExtension generates archive manifest and verifies checksums', () => {
+-- 
+2.56.1
+

@@ -1,0 +1,437 @@
+From a8477b8697fb2f9aa4716fc38c585b683584b993 Mon Sep 17 00:00:00 2001
+From: t3hkitty <123781437+t3hkitty@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 05:35:27 +0000
+Subject: [PATCH 08/11] feat(staging): add headless OAuth env injection, hard
+ quota limits, and 7z pack-first planning
+
+---
+ extensions/staging/index.ts | 158 +++++++++++++++++++++++++++++-------
+ extensions/staging/types.ts |  18 ++++
+ tests/staging.test.mjs      |  82 ++++++++++++++++++-
+ 3 files changed, 227 insertions(+), 31 deletions(-)
+
+diff --git a/extensions/staging/index.ts b/extensions/staging/index.ts
+index ffba36e..0a87a4c 100644
+--- a/extensions/staging/index.ts
++++ b/extensions/staging/index.ts
+@@ -6,24 +6,28 @@ import type {
+ import type {
+   StagingRemoteConfig,
+   StagingHopRecord,
+-  StagingQuotaStatus
++  StagingQuotaStatus,
++  StagingOAuthCredentials,
++  SevenZipPackPlan
+ } from './types.js';
+ 
+ export class StagingBridgeExtension implements IVaultrSubExtension {
+   public manifest: VaultrExtensionManifest = {
+-    id: 'vaultr-staging-bridge',
+-    name: 'Staging & Sync Bridge (Free GDrive/Dropbox Intermediary)',
++    id: 'vaultr-staging',
++    name: 'Vaultr Staging & Headless Sync Bridge',
+     version: '0.1.0',
+-    description: 'Manages no-subscription transient cloud staging hops (Google Drive, Dropbox) for .anymdz archives and batches with Pack-First, Verify-Destination, and Auto-Prune rules.',
++    description: 'Manages zero-disk-write headless rclone OAuth injection, free-tier quotas (15GB Drive / 2GB Dropbox), 7z .anymdz pack-first pipelines, and clear-after-verify auto-pruning.',
+     category: 'storage',
+     author: 't3hkitty',
+     entrypoint: 'extensions/staging/index.ts',
+     sourceUrl: 'https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/staging',
+     enabledByDefault: true,
+     capabilities: [
+-      'pack-first-hop',
+-      'verify-after-clear',
++      'headless-oauth-env-injection',
++      'zero-config-disk-writes',
++      'pack-first-anymdz',
+       'quota-guard',
++      'clear-after-verify',
+       'rclone-staging-builder'
+     ]
+   };
+@@ -40,7 +44,7 @@ export class StagingBridgeExtension implements IVaultrSubExtension {
+       remoteName: 'gdrive-staging:',
+       backendType: 'gdrive',
+       stagingRoot: 'vaultr_stage/',
+-      maxQuotaBytes: 15 * 1024 * 1024 * 1024, // 15 GB
++      maxQuotaBytes: 15 * 1024 * 1024 * 1024, // 15 GB free tier
+       retentionHours: 24,
+       autoPruneAfterVerify: true,
+       packFirstAnymdz: true
+@@ -50,7 +54,7 @@ export class StagingBridgeExtension implements IVaultrSubExtension {
+       remoteName: 'dbx-bridge:',
+       backendType: 'dropbox',
+       stagingRoot: 'vaultr_stage/',
+-      maxQuotaBytes: 2 * 1024 * 1024 * 1024, // 2 GB
++      maxQuotaBytes: 2 * 1024 * 1024 * 1024, // 2 GB free tier
+       retentionHours: 12,
+       autoPruneAfterVerify: true,
+       packFirstAnymdz: true
+@@ -59,9 +63,9 @@ export class StagingBridgeExtension implements IVaultrSubExtension {
+     this.hostApi.log({
+       timestamp: new Date().toISOString(),
+       level: 'info',
+-      source: 'vaultr:staging-bridge',
++      source: 'vaultr:staging',
+       stage: 'init',
+-      message: 'Staging Bridge extension initialized with gdrive-staging: (15GB) and dbx-bridge: (2GB) presets.'
++      message: 'Vaultr Staging extension initialized with headless OAuth injection and free-tier quotas (gdrive-staging: 15GB, dbx-bridge: 2GB).'
+     });
+   }
+ 
+@@ -80,8 +84,84 @@ export class StagingBridgeExtension implements IVaultrSubExtension {
+   }
+ 
+   /**
+-   * Plans a two-hop transfer: Source -> Staging -> Destination
+-   * Enforces: "Pack First, Hop Once" (packing into .anymdz or targeted list)
++   * Generates environment variables for headless, zero-config-file rclone execution.
++   * Maps out-of-band `rclone authorize` JSON tokens to RCLONE_CONFIG_<REMOTE>_* keys.
++   */
++  public generateHeadlessEnvVars(
++    remoteName: string,
++    credentials?: StagingOAuthCredentials
++  ): Record<string, string> {
++    const config = this.getStagingRemote(remoteName);
++    if (!config) {
++      throw new Error(`Staging remote "${remoteName}" is not registered.`);
++    }
++
++    const creds = credentials || config.credentials;
++    const cleanRemote = remoteName.replace(/:$/, '').toUpperCase().replace(/[^A-Z0-9]/g, '_');
++    const envVars: Record<string, string> = {};
++
++    if (config.backendType === 'gdrive') {
++      envVars[`RCLONE_CONFIG_${cleanRemote}_TYPE`] = 'drive';
++      envVars[`RCLONE_CONFIG_${cleanRemote}_SCOPE`] = creds?.scope || 'drive.file';
++    } else if (config.backendType === 'dropbox') {
++      envVars[`RCLONE_CONFIG_${cleanRemote}_TYPE`] = 'dropbox';
++    } else {
++      envVars[`RCLONE_CONFIG_${cleanRemote}_TYPE`] = config.backendType;
++    }
++
++    if (creds?.clientId) {
++      envVars[`RCLONE_CONFIG_${cleanRemote}_CLIENT_ID`] = creds.clientId;
++    }
++    if (creds?.clientSecret) {
++      envVars[`RCLONE_CONFIG_${cleanRemote}_CLIENT_SECRET`] = creds.clientSecret;
++    }
++
++    if (creds?.tokenJson) {
++      // Validate token JSON syntax
++      try {
++        JSON.parse(creds.tokenJson);
++      } catch {
++        throw new Error(`Invalid token JSON provided for headless remote ${remoteName}.`);
++      }
++      envVars[`RCLONE_CONFIG_${cleanRemote}_TOKEN`] = creds.tokenJson;
++    }
++
++    return envVars;
++  }
++
++  /**
++   * Plans a 7z packing command to bundle .anymd sidecars into a single .anymdz archive
++   * before upload. Avoids API rate-limiting on intermediary storage.
++   */
++  public planSevenZipPack(
++    sidecarFilePaths: string[],
++    outputDir: string,
++    archiveBaseName = 'sidecars'
++  ): SevenZipPackPlan {
++    if (sidecarFilePaths.length === 0) {
++      throw new Error('At least one sidecar file path must be specified to pack.');
++    }
++
++    const cleanBase = archiveBaseName.replace(/\.anymdz$/, '').replace(/\.7z$/, '');
++    const archiveName = `${cleanBase}.anymdz`;
++    const targetArchiveLocalPath = `${outputDir.replace(/[\/\\]$/, '')}/${archiveName}`;
++
++    // 7z a archive.anymdz file1.anymd file2.anymd -mx=7
++    const escapedFiles = sidecarFilePaths.map(p => `"${p}"`).join(' ');
++    const packCommand = `7z a "${targetArchiveLocalPath}" ${escapedFiles} -mx=7`;
++
++    return {
++      archiveName,
++      targetArchiveLocalPath,
++      filesToPack: [...sidecarFilePaths],
++      packCommand,
++      expectedOutputExt: '.anymdz'
++    };
++  }
++
++  /**
++   * Plans a two-hop transfer: Source -> Intermediary Staging -> Destination
++   * Enforces: "Pack First, Hop Once" and strict Quota Guards (<90% threshold and hard ceiling).
+    */
+   public planStagingHop(
+     sourceRemotePath: string,
+@@ -92,32 +172,51 @@ export class StagingBridgeExtension implements IVaultrSubExtension {
+       packedArchiveName?: string;
+       totalBytes: number;
+       checksumMd5: string;
++      currentStagingUsedBytes?: number;
+     }
+   ): {
+     hopRecord: StagingHopRecord;
+     stageCommand: string;
+     destPullCommand: string;
+     pruneCommand: string;
++    headlessEnv: Record<string, string>;
+   } {
+     const stagingConfig = this.getStagingRemote(stagingRemoteName);
+     if (!stagingConfig) {
+       throw new Error(`Staging remote "${stagingRemoteName}" is not registered in StagingBridge.`);
+     }
+ 
+-    // Quota guard check
+-    if (stagingConfig.maxQuotaBytes && options.totalBytes > stagingConfig.maxQuotaBytes * 0.9) {
++    const currentUsed = options.currentStagingUsedBytes || 0;
++    const quotaStatus = this.getQuotaStatus(stagingRemoteName, currentUsed);
++
++    // Hard ceiling check
++    if (stagingConfig.maxQuotaBytes && (currentUsed + options.totalBytes) > stagingConfig.maxQuotaBytes) {
++      const err = `Transfer size (${options.totalBytes} B) exceeds remaining capacity of ${stagingRemoteName} (Available: ${quotaStatus.availableBytes} B of ${quotaStatus.quotaBytes} B).`;
++      this.hostApi.log({
++        timestamp: new Date().toISOString(),
++        level: 'error',
++        source: 'vaultr:staging',
++        stage: 'quota-guard',
++        message: err,
++        meta: { totalBytes: options.totalBytes, quotaStatus }
++      });
++      throw new Error(err);
++    }
++
++    // 90% threshold warning
++    if (stagingConfig.maxQuotaBytes && (currentUsed + options.totalBytes) > (stagingConfig.maxQuotaBytes * 0.9)) {
+       this.hostApi.log({
+         timestamp: new Date().toISOString(),
+         level: 'warn',
+-        source: 'vaultr:staging-bridge',
++        source: 'vaultr:staging',
+         stage: 'quota-guard',
+-        message: `Transfer size (${options.totalBytes} B) exceeds 90% of free staging quota for ${stagingRemoteName}. Recommend direct transfer or chunking.`,
++        message: `Transfer will exceed 90% of free staging quota for ${stagingRemoteName}. Auto-pruning after verification is critical.`,
+         meta: { totalBytes: options.totalBytes, maxQuota: stagingConfig.maxQuotaBytes }
+       });
+     }
+ 
+     const hopId = `hop_${Date.now()}`;
+-    const filename = options.packedArchiveName || sourceRemotePath.split(/[\/\\]/).pop() || 'staged_payload';
++    const filename = options.packedArchiveName || sourceRemotePath.split(/[\/\\]/).pop() || 'staged_payload.anymdz';
+     const stagingPath = `${stagingConfig.stagingRoot.replace(/\/$/, '')}/${filename}`;
+     const fullStagingRemotePath = `${stagingConfig.remoteName}${stagingPath}`;
+ 
+@@ -136,25 +235,24 @@ export class StagingBridgeExtension implements IVaultrSubExtension {
+ 
+     this.activeHops.set(hopId, hopRecord);
+ 
+-    // 1. Source -> Staging
+-    const stageCommand = `rclone copyto "${sourceRemotePath}" "${fullStagingRemotePath}" --dry-run`;
+-
+-    // 2. Staging -> Destination
+-    const destPullCommand = `rclone copyto "${fullStagingRemotePath}" "${destinationRemotePath}" --checksum --dry-run`;
+-
+-    // 3. Auto-Prune Staging (Clear After Verify)
++    // Build targeted rclone commands
++    const stageCommand = `rclone copyto "${sourceRemotePath}" "${fullStagingRemotePath}" --no-traverse --dry-run`;
++    const destPullCommand = `rclone copyto "${fullStagingRemotePath}" "${destinationRemotePath}" --checksum --no-traverse --dry-run`;
+     const pruneCommand = `rclone deletefile "${fullStagingRemotePath}" --dry-run`;
+ 
++    const headlessEnv = this.generateHeadlessEnvVars(stagingRemoteName);
++
+     return {
+       hopRecord,
+       stageCommand,
+       destPullCommand,
+-      pruneCommand
++      pruneCommand,
++      headlessEnv
+     };
+   }
+ 
+   /**
+-   * Confirms destination arrival against MD5 checksum and prunes intermediary copy
++   * Confirms destination arrival against MD5 checksum and generates the clear-after-verify prune command.
+    */
+   public verifyAndPrune(
+     hopId: string,
+@@ -169,7 +267,7 @@ export class StagingBridgeExtension implements IVaultrSubExtension {
+       this.hostApi.log({
+         timestamp: new Date().toISOString(),
+         level: 'error',
+-        source: 'vaultr:staging-bridge',
++        source: 'vaultr:staging',
+         stage: 'verify',
+         message: `Destination checksum mismatch for hop ${hopId}! Expected: ${hop.manifestChecksumMd5}, Got: ${destinationObservedMd5}. Halting auto-prune.`,
+         meta: { hopId }
+@@ -188,7 +286,7 @@ export class StagingBridgeExtension implements IVaultrSubExtension {
+     this.hostApi.log({
+       timestamp: new Date().toISOString(),
+       level: 'info',
+-      source: 'vaultr:staging-bridge',
++      source: 'vaultr:staging',
+       stage: 'prune',
+       message: `Verified destination for hop ${hopId}. Staging file ${hop.stagingRemotePath} pruned to preserve free quota.`,
+       meta: { hopId, stagingPath: hop.stagingRemotePath }
+@@ -220,7 +318,9 @@ export class StagingBridgeExtension implements IVaultrSubExtension {
+       quotaBytes,
+       availableBytes: available,
+       percentUsed: parseFloat(percent.toFixed(1)),
+-      stagedItemsCount
++      stagedItemsCount,
++      isExceeded: currentUsedBytes >= quotaBytes,
++      warningThresholdReached: percent >= 90
+     };
+   }
+ }
+diff --git a/extensions/staging/types.ts b/extensions/staging/types.ts
+index d6d890c..131d37f 100644
+--- a/extensions/staging/types.ts
++++ b/extensions/staging/types.ts
+@@ -1,5 +1,12 @@
+ export type StagingBackendType = 'gdrive' | 'dropbox' | 'webdav' | 'local' | 'generic';
+ 
++export interface StagingOAuthCredentials {
++  tokenJson: string; // Serialized JSON output from `rclone authorize`
++  clientId?: string;
++  clientSecret?: string;
++  scope?: string;
++}
++
+ export interface StagingRemoteConfig {
+   remoteName: string;          // e.g. 'gdrive-staging:' or 'dbx-bridge:'
+   backendType: StagingBackendType;
+@@ -8,6 +15,7 @@ export interface StagingRemoteConfig {
+   retentionHours?: number;     // e.g. 24h default before auto-cleanup alert
+   autoPruneAfterVerify?: boolean; // Default true: Clear after destination manifest verification
+   packFirstAnymdz?: boolean;   // Default true: Pack into .anymdz before transferring
++  credentials?: StagingOAuthCredentials; // Out-of-band OAuth refresh token & client info
+ }
+ 
+ export type StageHopStatus = 'staged' | 'verified_at_dest' | 'pruned' | 'failed';
+@@ -34,4 +42,14 @@ export interface StagingQuotaStatus {
+   availableBytes: number;
+   percentUsed: number;
+   stagedItemsCount: number;
++  isExceeded: boolean;
++  warningThresholdReached: boolean;
++}
++
++export interface SevenZipPackPlan {
++  archiveName: string;
++  targetArchiveLocalPath: string;
++  filesToPack: string[];
++  packCommand: string;
++  expectedOutputExt: '.anymdz' | '.7z';
+ }
+diff --git a/tests/staging.test.mjs b/tests/staging.test.mjs
+index 3abbb49..9a446f1 100644
+--- a/tests/staging.test.mjs
++++ b/tests/staging.test.mjs
+@@ -31,6 +31,81 @@ test('StagingBridgeExtension registers free-tier presets (gdrive-staging 15GB, d
+   assert.equal(dbx.maxQuotaBytes, 2 * 1024 * 1024 * 1024);
+ });
+ 
++test('StagingBridgeExtension generates headless env vars from rclone authorize token JSON without disk writes', () => {
++  const host = createMockHost();
++  const bridge = new StagingBridgeExtension();
++  bridge.init(host);
++
++  const tokenBlob = JSON.stringify({
++    access_token: 'ya29.mock_token',
++    token_type: 'Bearer',
++    refresh_token: '1//04_refresh_token',
++    expiry: '2026-11-23T08:00:00Z'
++  });
++
++  const env = bridge.generateHeadlessEnvVars('gdrive-staging:', {
++    tokenJson: tokenBlob,
++    clientId: 'custom-client.apps.googleusercontent.com',
++    clientSecret: 'secret-1234',
++    scope: 'drive.file'
++  });
++
++  assert.equal(env.RCLONE_CONFIG_GDRIVE_STAGING_TYPE, 'drive');
++  assert.equal(env.RCLONE_CONFIG_GDRIVE_STAGING_SCOPE, 'drive.file');
++  assert.equal(env.RCLONE_CONFIG_GDRIVE_STAGING_CLIENT_ID, 'custom-client.apps.googleusercontent.com');
++  assert.equal(env.RCLONE_CONFIG_GDRIVE_STAGING_CLIENT_SECRET, 'secret-1234');
++  assert.equal(env.RCLONE_CONFIG_GDRIVE_STAGING_TOKEN, tokenBlob);
++
++  const dropboxTokenBlob = JSON.stringify({
++    access_token: 'sl.mock_dropbox_token',
++    refresh_token: 'dbx_refresh_123',
++    expiry: '2026-11-23T08:00:00Z'
++  });
++
++  const dbxEnv = bridge.generateHeadlessEnvVars('dbx-bridge:', {
++    tokenJson: dropboxTokenBlob
++  });
++
++  assert.equal(dbxEnv.RCLONE_CONFIG_DBX_BRIDGE_TYPE, 'dropbox');
++  assert.equal(dbxEnv.RCLONE_CONFIG_DBX_BRIDGE_TOKEN, dropboxTokenBlob);
++});
++
++test('StagingBridgeExtension plans 7z packing of .anymd files into .anymdz archive before upload', () => {
++  const host = createMockHost();
++  const bridge = new StagingBridgeExtension();
++  bridge.init(host);
++
++  const packPlan = bridge.planSevenZipPack(
++    ['/vault/book1.anymd', '/vault/book2.anymd'],
++    '/tmp/scratch',
++    'reading_batch'
++  );
++
++  assert.equal(packPlan.archiveName, 'reading_batch.anymdz');
++  assert.equal(packPlan.targetArchiveLocalPath, '/tmp/scratch/reading_batch.anymdz');
++  assert.equal(packPlan.packCommand, '7z a "/tmp/scratch/reading_batch.anymdz" "/vault/book1.anymd" "/vault/book2.anymd" -mx=7');
++  assert.equal(packPlan.expectedOutputExt, '.anymdz');
++});
++
++test('StagingBridgeExtension enforces hard quota limit on free staging storage', () => {
++  const host = createMockHost();
++  const bridge = new StagingBridgeExtension();
++  bridge.init(host);
++
++  // Attempting to stage 2.5 GB on 2 GB Dropbox staging should throw hard error
++  assert.throws(() => {
++    bridge.planStagingHop(
++      'local:/vault/giant.iso',
++      'dbx-bridge:',
++      'koofr:/backups/giant.iso',
++      {
++        totalBytes: 2.5 * 1024 * 1024 * 1024,
++        checksumMd5: 'dummyhash'
++      }
++    );
++  }, /exceeds remaining capacity of dbx-bridge:/);
++});
++
+ test('StagingBridgeExtension plans two-hop Pack-First transfer with auto-prune command', () => {
+   const host = createMockHost();
+   const bridge = new StagingBridgeExtension();
+@@ -49,9 +124,10 @@ test('StagingBridgeExtension plans two-hop Pack-First transfer with auto-prune c
+   );
+ 
+   assert.equal(plan.hopRecord.status, 'staged');
+-  assert.equal(plan.stageCommand, 'rclone copyto "local:/vault/sidecars.anymdz" "gdrive-staging:vaultr_stage/sidecars.anymdz" --dry-run');
+-  assert.equal(plan.destPullCommand, 'rclone copyto "gdrive-staging:vaultr_stage/sidecars.anymdz" "koofr:/backups/sidecars.anymdz" --checksum --dry-run');
++  assert.equal(plan.stageCommand, 'rclone copyto "local:/vault/sidecars.anymdz" "gdrive-staging:vaultr_stage/sidecars.anymdz" --no-traverse --dry-run');
++  assert.equal(plan.destPullCommand, 'rclone copyto "gdrive-staging:vaultr_stage/sidecars.anymdz" "koofr:/backups/sidecars.anymdz" --checksum --no-traverse --dry-run');
+   assert.equal(plan.pruneCommand, 'rclone deletefile "gdrive-staging:vaultr_stage/sidecars.anymdz" --dry-run');
++  assert.ok(plan.headlessEnv.RCLONE_CONFIG_GDRIVE_STAGING_TYPE === 'drive');
+ });
+ 
+ test('StagingBridgeExtension verifyAndPrune verifies destination MD5 and generates deletefile command', () => {
+@@ -90,4 +166,6 @@ test('StagingBridgeExtension calculates quota usage status correctly', () => {
+   assert.equal(quota.remoteName, 'dbx-bridge:');
+   assert.equal(quota.usedBytes, 500 * 1024 * 1024);
+   assert.equal(quota.percentUsed, 24.4);
++  assert.equal(quota.isExceeded, false);
++  assert.equal(quota.warningThresholdReached, false);
+ });
+-- 
+2.56.1
+

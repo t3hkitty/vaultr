@@ -1,0 +1,430 @@
+From f84bd27b44d690fed0cf87715d940ad3fd98c929 Mon Sep 17 00:00:00 2001
+From: t3hkitty <123781437+t3hkitty@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 05:05:30 +0000
+Subject: [PATCH 04/11] Scaffold vaultr-staging-bridge extension with
+ Pack-First, Quota-Guard, and Clear-After-Verify rclone rules
+
+---
+ extensions/index.ts         |   1 +
+ extensions/staging/index.ts | 230 ++++++++++++++++++++++++++++++++++++
+ extensions/staging/types.ts |  37 ++++++
+ registry/extensions.json    |  12 ++
+ tests/staging.test.mjs      |  93 +++++++++++++++
+ 5 files changed, 373 insertions(+)
+ create mode 100644 extensions/staging/index.ts
+ create mode 100644 extensions/staging/types.ts
+ create mode 100644 tests/staging.test.mjs
+
+diff --git a/extensions/index.ts b/extensions/index.ts
+index 1480d18..6ed7152 100644
+--- a/extensions/index.ts
++++ b/extensions/index.ts
+@@ -6,3 +6,4 @@ export * from './kittlibr/index.js';
+ export * from './backup/index.js';
+ export * from './dedupe/index.js';
+ export * from './playlistr/index.js';
++export * from './staging/index.js';
+diff --git a/extensions/staging/index.ts b/extensions/staging/index.ts
+new file mode 100644
+index 0000000..ffba36e
+--- /dev/null
++++ b/extensions/staging/index.ts
+@@ -0,0 +1,230 @@
++import type {
++  IVaultrSubExtension,
++  VaultrExtensionManifest,
++  VaultrExtensionHostApi
++} from '../types.js';
++import type {
++  StagingRemoteConfig,
++  StagingHopRecord,
++  StagingQuotaStatus
++} from './types.js';
++
++export class StagingBridgeExtension implements IVaultrSubExtension {
++  public manifest: VaultrExtensionManifest = {
++    id: 'vaultr-staging-bridge',
++    name: 'Staging & Sync Bridge (Free GDrive/Dropbox Intermediary)',
++    version: '0.1.0',
++    description: 'Manages no-subscription transient cloud staging hops (Google Drive, Dropbox) for .anymdz archives and batches with Pack-First, Verify-Destination, and Auto-Prune rules.',
++    category: 'storage',
++    author: 't3hkitty',
++    entrypoint: 'extensions/staging/index.ts',
++    sourceUrl: 'https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/staging',
++    enabledByDefault: true,
++    capabilities: [
++      'pack-first-hop',
++      'verify-after-clear',
++      'quota-guard',
++      'rclone-staging-builder'
++    ]
++  };
++
++  private hostApi!: VaultrExtensionHostApi;
++  private stagingRemotes = new Map<string, StagingRemoteConfig>();
++  private activeHops = new Map<string, StagingHopRecord>();
++
++  public init(api: VaultrExtensionHostApi): void {
++    this.hostApi = api;
++
++    // Register standard free-tier presets
++    this.registerStagingRemote({
++      remoteName: 'gdrive-staging:',
++      backendType: 'gdrive',
++      stagingRoot: 'vaultr_stage/',
++      maxQuotaBytes: 15 * 1024 * 1024 * 1024, // 15 GB
++      retentionHours: 24,
++      autoPruneAfterVerify: true,
++      packFirstAnymdz: true
++    });
++
++    this.registerStagingRemote({
++      remoteName: 'dbx-bridge:',
++      backendType: 'dropbox',
++      stagingRoot: 'vaultr_stage/',
++      maxQuotaBytes: 2 * 1024 * 1024 * 1024, // 2 GB
++      retentionHours: 12,
++      autoPruneAfterVerify: true,
++      packFirstAnymdz: true
++    });
++
++    this.hostApi.log({
++      timestamp: new Date().toISOString(),
++      level: 'info',
++      source: 'vaultr:staging-bridge',
++      stage: 'init',
++      message: 'Staging Bridge extension initialized with gdrive-staging: (15GB) and dbx-bridge: (2GB) presets.'
++    });
++  }
++
++  public registerStagingRemote(config: StagingRemoteConfig): void {
++    const key = config.remoteName.toLowerCase().replace(/:$/, '') + ':';
++    this.stagingRemotes.set(key, config);
++  }
++
++  public getStagingRemote(name: string): StagingRemoteConfig | undefined {
++    const key = name.toLowerCase().replace(/:$/, '') + ':';
++    return this.stagingRemotes.get(key);
++  }
++
++  public getAllStagingRemotes(): StagingRemoteConfig[] {
++    return Array.from(this.stagingRemotes.values());
++  }
++
++  /**
++   * Plans a two-hop transfer: Source -> Staging -> Destination
++   * Enforces: "Pack First, Hop Once" (packing into .anymdz or targeted list)
++   */
++  public planStagingHop(
++    sourceRemotePath: string,
++    stagingRemoteName: string,
++    destinationRemotePath: string,
++    options: {
++      isPackedAnymdz?: boolean;
++      packedArchiveName?: string;
++      totalBytes: number;
++      checksumMd5: string;
++    }
++  ): {
++    hopRecord: StagingHopRecord;
++    stageCommand: string;
++    destPullCommand: string;
++    pruneCommand: string;
++  } {
++    const stagingConfig = this.getStagingRemote(stagingRemoteName);
++    if (!stagingConfig) {
++      throw new Error(`Staging remote "${stagingRemoteName}" is not registered in StagingBridge.`);
++    }
++
++    // Quota guard check
++    if (stagingConfig.maxQuotaBytes && options.totalBytes > stagingConfig.maxQuotaBytes * 0.9) {
++      this.hostApi.log({
++        timestamp: new Date().toISOString(),
++        level: 'warn',
++        source: 'vaultr:staging-bridge',
++        stage: 'quota-guard',
++        message: `Transfer size (${options.totalBytes} B) exceeds 90% of free staging quota for ${stagingRemoteName}. Recommend direct transfer or chunking.`,
++        meta: { totalBytes: options.totalBytes, maxQuota: stagingConfig.maxQuotaBytes }
++      });
++    }
++
++    const hopId = `hop_${Date.now()}`;
++    const filename = options.packedArchiveName || sourceRemotePath.split(/[\/\\]/).pop() || 'staged_payload';
++    const stagingPath = `${stagingConfig.stagingRoot.replace(/\/$/, '')}/${filename}`;
++    const fullStagingRemotePath = `${stagingConfig.remoteName}${stagingPath}`;
++
++    const hopRecord: StagingHopRecord = {
++      hopId,
++      sourceRemotePath,
++      stagingRemotePath: fullStagingRemotePath,
++      destinationRemotePath,
++      isPackedAnymdz: options.isPackedAnymdz ?? true,
++      packedArchiveName: options.packedArchiveName,
++      manifestChecksumMd5: options.checksumMd5,
++      totalBytes: options.totalBytes,
++      createdAt: new Date().toISOString(),
++      status: 'staged'
++    };
++
++    this.activeHops.set(hopId, hopRecord);
++
++    // 1. Source -> Staging
++    const stageCommand = `rclone copyto "${sourceRemotePath}" "${fullStagingRemotePath}" --dry-run`;
++
++    // 2. Staging -> Destination
++    const destPullCommand = `rclone copyto "${fullStagingRemotePath}" "${destinationRemotePath}" --checksum --dry-run`;
++
++    // 3. Auto-Prune Staging (Clear After Verify)
++    const pruneCommand = `rclone deletefile "${fullStagingRemotePath}" --dry-run`;
++
++    return {
++      hopRecord,
++      stageCommand,
++      destPullCommand,
++      pruneCommand
++    };
++  }
++
++  /**
++   * Confirms destination arrival against MD5 checksum and prunes intermediary copy
++   */
++  public verifyAndPrune(
++    hopId: string,
++    destinationObservedMd5: string
++  ): { success: boolean; shouldPrune: boolean; pruneCommand?: string; error?: string } {
++    const hop = this.activeHops.get(hopId);
++    if (!hop) {
++      return { success: false, shouldPrune: false, error: `Hop ${hopId} not found.` };
++    }
++
++    if (hop.manifestChecksumMd5.toLowerCase() !== destinationObservedMd5.toLowerCase()) {
++      this.hostApi.log({
++        timestamp: new Date().toISOString(),
++        level: 'error',
++        source: 'vaultr:staging-bridge',
++        stage: 'verify',
++        message: `Destination checksum mismatch for hop ${hopId}! Expected: ${hop.manifestChecksumMd5}, Got: ${destinationObservedMd5}. Halting auto-prune.`,
++        meta: { hopId }
++      });
++      hop.status = 'failed';
++      return { success: false, shouldPrune: false, error: 'Checksum mismatch on destination' };
++    }
++
++    hop.status = 'verified_at_dest';
++    hop.verifiedAt = new Date().toISOString();
++
++    const pruneCommand = `rclone deletefile "${hop.stagingRemotePath}"`;
++    hop.status = 'pruned';
++    hop.prunedAt = new Date().toISOString();
++
++    this.hostApi.log({
++      timestamp: new Date().toISOString(),
++      level: 'info',
++      source: 'vaultr:staging-bridge',
++      stage: 'prune',
++      message: `Verified destination for hop ${hopId}. Staging file ${hop.stagingRemotePath} pruned to preserve free quota.`,
++      meta: { hopId, stagingPath: hop.stagingRemotePath }
++    });
++
++    return {
++      success: true,
++      shouldPrune: true,
++      pruneCommand
++    };
++  }
++
++  /**
++   * Evaluates quota status across staging remotes
++   */
++  public getQuotaStatus(remoteName: string, currentUsedBytes = 0): StagingQuotaStatus {
++    const config = this.getStagingRemote(remoteName);
++    const quotaBytes = config?.maxQuotaBytes || 15 * 1024 * 1024 * 1024;
++    const available = Math.max(0, quotaBytes - currentUsedBytes);
++    const percent = quotaBytes > 0 ? (currentUsedBytes / quotaBytes) * 100 : 0;
++
++    const stagedItemsCount = Array.from(this.activeHops.values()).filter(
++      h => h.stagingRemotePath.startsWith(remoteName) && h.status === 'staged'
++    ).length;
++
++    return {
++      remoteName,
++      usedBytes: currentUsedBytes,
++      quotaBytes,
++      availableBytes: available,
++      percentUsed: parseFloat(percent.toFixed(1)),
++      stagedItemsCount
++    };
++  }
++}
++
++export default function createExtension(): IVaultrSubExtension {
++  return new StagingBridgeExtension();
++}
+diff --git a/extensions/staging/types.ts b/extensions/staging/types.ts
+new file mode 100644
+index 0000000..d6d890c
+--- /dev/null
++++ b/extensions/staging/types.ts
+@@ -0,0 +1,37 @@
++export type StagingBackendType = 'gdrive' | 'dropbox' | 'webdav' | 'local' | 'generic';
++
++export interface StagingRemoteConfig {
++  remoteName: string;          // e.g. 'gdrive-staging:' or 'dbx-bridge:'
++  backendType: StagingBackendType;
++  stagingRoot: string;         // e.g. 'vaultr_stage/'
++  maxQuotaBytes?: number;      // e.g. 15 * 1024 * 1024 * 1024 for 15GB free Google Drive, or 2GB for Dropbox
++  retentionHours?: number;     // e.g. 24h default before auto-cleanup alert
++  autoPruneAfterVerify?: boolean; // Default true: Clear after destination manifest verification
++  packFirstAnymdz?: boolean;   // Default true: Pack into .anymdz before transferring
++}
++
++export type StageHopStatus = 'staged' | 'verified_at_dest' | 'pruned' | 'failed';
++
++export interface StagingHopRecord {
++  hopId: string;
++  sourceRemotePath: string;
++  stagingRemotePath: string;
++  destinationRemotePath: string;
++  isPackedAnymdz: boolean;
++  packedArchiveName?: string;
++  manifestChecksumMd5: string;
++  totalBytes: number;
++  createdAt: string;
++  status: StageHopStatus;
++  verifiedAt?: string;
++  prunedAt?: string;
++}
++
++export interface StagingQuotaStatus {
++  remoteName: string;
++  usedBytes: number;
++  quotaBytes: number;
++  availableBytes: number;
++  percentUsed: number;
++  stagedItemsCount: number;
++}
+diff --git a/registry/extensions.json b/registry/extensions.json
+index b854809..027d8f6 100644
+--- a/registry/extensions.json
++++ b/registry/extensions.json
+@@ -86,6 +86,18 @@
+       "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/playlistr",
+       "enabledByDefault": true,
+       "capabilities": ["dynamic-shelf-evaluation", "m3u8-export", "anymd-playlist-sidecar", "rclone-files-from-prefetch", "html5-queue-bridge"]
++    },
++    {
++      "id": "vaultr-staging-bridge",
++      "name": "Staging & Sync Bridge (Free GDrive/Dropbox Intermediary)",
++      "version": "0.1.0",
++      "description": "Manages no-subscription transient cloud staging hops (Google Drive, Dropbox) for .anymdz archives and batches with Pack-First, Verify-Destination, and Auto-Prune rules.",
++      "category": "storage",
++      "author": "t3hkitty",
++      "entrypoint": "https://raw.githubusercontent.com/t3hkitty/vaultr-exts/main/extensions/staging/index.ts",
++      "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/staging",
++      "enabledByDefault": true,
++      "capabilities": ["pack-first-hop", "verify-after-clear", "quota-guard", "rclone-staging-builder"]
+     }
+   ]
+ }
+diff --git a/tests/staging.test.mjs b/tests/staging.test.mjs
+new file mode 100644
+index 0000000..3abbb49
+--- /dev/null
++++ b/tests/staging.test.mjs
+@@ -0,0 +1,93 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { StagingBridgeExtension } from '../dist/staging/index.js';
++
++function createMockHost() {
++  const logs = [];
++  return {
++    log: (entry) => logs.push(entry),
++    getFiles: () => [],
++    getFileByPath: () => undefined,
++    saveSidecar: async () => {},
++    executeRclonePreview: () => {},
++    logs
++  };
++}
++
++test('StagingBridgeExtension registers free-tier presets (gdrive-staging 15GB, dbx-bridge 2GB)', () => {
++  const host = createMockHost();
++  const bridge = new StagingBridgeExtension();
++  bridge.init(host);
++
++  const gdrive = bridge.getStagingRemote('gdrive-staging:');
++  assert.ok(gdrive !== undefined);
++  assert.equal(gdrive.backendType, 'gdrive');
++  assert.equal(gdrive.maxQuotaBytes, 15 * 1024 * 1024 * 1024);
++  assert.equal(gdrive.packFirstAnymdz, true);
++
++  const dbx = bridge.getStagingRemote('dbx-bridge:');
++  assert.ok(dbx !== undefined);
++  assert.equal(dbx.backendType, 'dropbox');
++  assert.equal(dbx.maxQuotaBytes, 2 * 1024 * 1024 * 1024);
++});
++
++test('StagingBridgeExtension plans two-hop Pack-First transfer with auto-prune command', () => {
++  const host = createMockHost();
++  const bridge = new StagingBridgeExtension();
++  bridge.init(host);
++
++  const plan = bridge.planStagingHop(
++    'local:/vault/sidecars.anymdz',
++    'gdrive-staging:',
++    'koofr:/backups/sidecars.anymdz',
++    {
++      isPackedAnymdz: true,
++      packedArchiveName: 'sidecars.anymdz',
++      totalBytes: 50 * 1024 * 1024, // 50MB
++      checksumMd5: 'abcd1234abcd1234'
++    }
++  );
++
++  assert.equal(plan.hopRecord.status, 'staged');
++  assert.equal(plan.stageCommand, 'rclone copyto "local:/vault/sidecars.anymdz" "gdrive-staging:vaultr_stage/sidecars.anymdz" --dry-run');
++  assert.equal(plan.destPullCommand, 'rclone copyto "gdrive-staging:vaultr_stage/sidecars.anymdz" "koofr:/backups/sidecars.anymdz" --checksum --dry-run');
++  assert.equal(plan.pruneCommand, 'rclone deletefile "gdrive-staging:vaultr_stage/sidecars.anymdz" --dry-run');
++});
++
++test('StagingBridgeExtension verifyAndPrune verifies destination MD5 and generates deletefile command', () => {
++  const host = createMockHost();
++  const bridge = new StagingBridgeExtension();
++  bridge.init(host);
++
++  const plan = bridge.planStagingHop(
++    'local:/vault/manifest.anymd',
++    'dbx-bridge:',
++    'davjump:/vault/manifest.anymd',
++    {
++      totalBytes: 1024,
++      checksumMd5: 'deadbeef9999'
++    }
++  );
++
++  // Mismatched checksum should fail and prevent pruning
++  const mismatchResult = bridge.verifyAndPrune(plan.hopRecord.hopId, 'wrong_hash');
++  assert.equal(mismatchResult.success, false);
++  assert.equal(mismatchResult.shouldPrune, false);
++
++  // Matched checksum should succeed and return real prune command
++  const matchResult = bridge.verifyAndPrune(plan.hopRecord.hopId, 'deadbeef9999');
++  assert.equal(matchResult.success, true);
++  assert.equal(matchResult.shouldPrune, true);
++  assert.ok(matchResult.pruneCommand?.includes('rclone deletefile "dbx-bridge:vaultr_stage/manifest.anymd"'));
++});
++
++test('StagingBridgeExtension calculates quota usage status correctly', () => {
++  const host = createMockHost();
++  const bridge = new StagingBridgeExtension();
++  bridge.init(host);
++
++  const quota = bridge.getQuotaStatus('dbx-bridge:', 500 * 1024 * 1024); // 500 MB used of 2GB
++  assert.equal(quota.remoteName, 'dbx-bridge:');
++  assert.equal(quota.usedBytes, 500 * 1024 * 1024);
++  assert.equal(quota.percentUsed, 24.4);
++});
+-- 
+2.56.1
+

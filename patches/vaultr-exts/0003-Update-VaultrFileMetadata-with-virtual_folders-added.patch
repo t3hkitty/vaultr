@@ -1,0 +1,27 @@
+From c9b7f4af5af31dd543b5a8bd6924e6bb9b030342 Mon Sep 17 00:00:00 2001
+From: t3hkitty <123781437+t3hkitty@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 04:56:22 +0000
+Subject: [PATCH 03/11] Update VaultrFileMetadata with virtual_folders,
+ added_at, and ingest_source in vaultr-exts
+
+---
+ extensions/types.ts | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/extensions/types.ts b/extensions/types.ts
+index 5dc57d1..6e94b54 100644
+--- a/extensions/types.ts
++++ b/extensions/types.ts
+@@ -11,6 +11,9 @@ export interface VaultrFileMetadata {
+   mtime: string;
+   mimeOrExt: string;
+   tags: string[];
++  added_at?: string;
++  ingest_source?: 'downloads' | 'import' | 'lsf' | 'saf' | string;
++  virtual_folders?: string[];
+   sidecarPath?: string;
+   custom?: Record<string, unknown>;
+ }
+-- 
+2.56.1
+

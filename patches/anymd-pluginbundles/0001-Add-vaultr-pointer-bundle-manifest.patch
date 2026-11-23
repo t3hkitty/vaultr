@@ -1,0 +1,57 @@
+From ff3391b48aec1089a13bd01ba684c75b629ded5f Mon Sep 17 00:00:00 2001
+From: t3hkitty <123781437+t3hkitty@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 04:44:32 +0000
+Subject: [PATCH 1/2] Add vaultr pointer bundle manifest
+
+---
+ bundles/vaultr.bundle.json | 38 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 38 insertions(+)
+ create mode 100644 bundles/vaultr.bundle.json
+
+diff --git a/bundles/vaultr.bundle.json b/bundles/vaultr.bundle.json
+new file mode 100644
+index 0000000..69a300c
+--- /dev/null
++++ b/bundles/vaultr.bundle.json
+@@ -0,0 +1,38 @@
++{
++  "$schema": "https://raw.githubusercontent.com/t3hkitty/anymd/main/schemas/bundle.schema.json",
++  "id": "vaultr",
++  "name": "Vaultr Vault & Remote Storage Manager",
++  "version": "0.1.0",
++  "description": "Sidecar-first file and vault manager extension for AnyMD. Designed around .anymd sidecars, YAML metadata indexing, md5 duplicate grouping, targeted rclone command builders (lsf/copyto/cat/--files-from), and Koofr-inspired shelf browsing without folder-listing limits.",
++  "author": "t3hkitty",
++  "homepage": "https://github.com/t3hkitty/vaultr",
++  "repository": {
++    "type": "git",
++    "url": "https://github.com/t3hkitty/vaultr.git"
++  },
++  "category": "storage",
++  "enabledByDefault": false,
++  "bundleType": "pointer",
++  "entrypoint": "https://raw.githubusercontent.com/t3hkitty/vaultr/main/extensions/vaultr/index.ts",
++  "sourceRepo": "t3hkitty/vaultr",
++  "manifestUrl": "https://raw.githubusercontent.com/t3hkitty/vaultr/main/bundles/vaultr.bundle.json",
++  "capabilities": [
++    "sidecar-indexing",
++    "yaml-metadata-parsing",
++    "md5-deduplication",
++    "targeted-rclone-builder",
++    "rclone-rcd-client",
++    "koofr-browser-ui",
++    "shelves-taxonomy",
++    "batch-safe-actions"
++  ],
++  "supportedRemotes": [
++    "local",
++    "Z:",
++    "T:",
++    "davjump:",
++    "koofr:",
++    "tbox:",
++    "meow-vault"
++  ]
++}
+-- 
+2.56.1
+

@@ -1,0 +1,452 @@
+From 0f205eef6d7e73f8051cfce3fc35111aeb740f17 Mon Sep 17 00:00:00 2001
+From: t3hkitty <123781437+t3hkitty@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 05:10:58 +0000
+Subject: [PATCH 06/11] Scaffold vaultr-torbox extension with direct API
+ client, token redaction, sidecar generator, and unpackr handoff
+
+---
+ extensions/index.ts        |   1 +
+ extensions/torbox/index.ts | 216 +++++++++++++++++++++++++++++++++++++
+ extensions/torbox/types.ts |  34 ++++++
+ registry/extensions.json   |  12 +++
+ tests/torbox.test.mjs      | 132 +++++++++++++++++++++++
+ 5 files changed, 395 insertions(+)
+ create mode 100644 extensions/torbox/index.ts
+ create mode 100644 extensions/torbox/types.ts
+ create mode 100644 tests/torbox.test.mjs
+
+diff --git a/extensions/index.ts b/extensions/index.ts
+index dc915f1..1ee0297 100644
+--- a/extensions/index.ts
++++ b/extensions/index.ts
+@@ -8,3 +8,4 @@ export * from './dedupe/index.js';
+ export * from './playlistr/index.js';
+ export * from './staging/index.js';
+ export * from './unpackr/index.js';
++export * from './torbox/index.js';
+diff --git a/extensions/torbox/index.ts b/extensions/torbox/index.ts
+new file mode 100644
+index 0000000..793e29d
+--- /dev/null
++++ b/extensions/torbox/index.ts
+@@ -0,0 +1,216 @@
++import type {
++  IVaultrSubExtension,
++  VaultrExtensionManifest,
++  VaultrExtensionHostApi,
++  VaultrFileMetadata,
++  VaultrLogEntry
++} from '../types.js';
++import type {
++  TorBoxTorrentItem,
++  TorBoxFileItem,
++  TorBoxApiResponse,
++  TorBoxClientConfig
++} from './types.js';
++
++export class TorBoxExtension implements IVaultrSubExtension {
++  public manifest: VaultrExtensionManifest = {
++    id: 'vaultr-torbox',
++    name: 'TorBox Direct API Client & Sidecar Generator',
++    version: '0.1.0',
++    description: 'Direct HTTPS TorBox API client inspecting remote torrent items and files, generating .anymd YAML sidecars, and selectively pulling files with unpackr integration without blind archive downloads.',
++    category: 'storage',
++    author: 't3hkitty',
++    entrypoint: 'extensions/torbox/index.ts',
++    sourceUrl: 'https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/torbox',
++    enabledByDefault: true,
++    capabilities: [
++      'torbox-direct-api',
++      'bearer-token-redaction',
++      'sidecar-first-torbox-index',
++      'selective-torbox-download',
++      'unpackr-handoff'
++    ]
++  };
++
++  private hostApi!: VaultrExtensionHostApi;
++  private config: Required<TorBoxClientConfig>;
++
++  constructor(config: TorBoxClientConfig = {}) {
++    this.config = {
++      apiKey: config.apiKey || (typeof process !== 'undefined' ? process.env.TORBOX_API_KEY || '' : ''),
++      apiBaseUrl: config.apiBaseUrl || 'https://api.torbox.app/v1/api',
++      timeoutMs: config.timeoutMs || 15000
++    };
++  }
++
++  public init(api: VaultrExtensionHostApi): void {
++    this.hostApi = api;
++    this.logRedacted('init', 'TorBox extension initialized with direct API capabilities.');
++  }
++
++  public setApiKey(key: string): void {
++    this.config.apiKey = key;
++  }
++
++  public getApiBaseUrl(): string {
++    return this.config.apiBaseUrl;
++  }
++
++  /**
++   * Redacts sensitive bearer tokens before logging to AnyMD host
++   */
++  public logRedacted(stage: string, message: string, meta: Record<string, unknown> = {}): void {
++    const sanitizedMeta = { ...meta };
++    if (sanitizedMeta.apiKey || sanitizedMeta.token || sanitizedMeta.authorization) {
++      delete sanitizedMeta.apiKey;
++      delete sanitizedMeta.token;
++      delete sanitizedMeta.authorization;
++      sanitizedMeta.tokenRedacted = true;
++    }
++
++    const sanitizedMessage = this.config.apiKey
++      ? message.replace(new RegExp(this.config.apiKey, 'g'), '[REDACTED_TORBOX_KEY]')
++      : message;
++
++    this.hostApi?.log({
++      timestamp: new Date().toISOString(),
++      level: 'info',
++      source: 'vaultr:torbox',
++      stage,
++      message: sanitizedMessage,
++      meta: sanitizedMeta
++    });
++  }
++
++  /**
++   * Parses TorBox API torrent list response into normalized items
++   */
++  public parseTorrentsResponse(response: TorBoxApiResponse<TorBoxTorrentItem[]>): TorBoxTorrentItem[] {
++    if (!response || !response.success || !Array.isArray(response.data)) {
++      this.logRedacted('api-parse', `TorBox response invalid or failed: ${response?.error || 'Unknown error'}`);
++      return [];
++    }
++    return response.data;
++  }
++
++  /**
++   * Generates .anymd YAML sidecars directly from TorBox API item metadata
++   */
++  public generateTorboxSidecars(
++    torrent: TorBoxTorrentItem,
++    options: { targetShelf?: string } = {}
++  ): VaultrFileMetadata[] {
++    const sidecars: VaultrFileMetadata[] = [];
++    const files = torrent.files && torrent.files.length > 0
++      ? torrent.files
++      : [{ id: 0, name: torrent.name, size: torrent.size }];
++
++    for (const f of files) {
++      const ext = f.name.split('.').pop() || 'bin';
++      const cleanPath = `tbox:/${torrent.name}/${f.name}`;
++      const virtualFolders = ['TorBox Inbox'];
++      if (options.targetShelf) {
++        virtualFolders.push(options.targetShelf);
++      }
++
++      const meta: VaultrFileMetadata = {
++        path: cleanPath,
++        remote: 'tbox:',
++        remotePath: `${torrent.name}/${f.name}`,
++        md5: f.hash || torrent.hash || '',
++        size: f.size || 0,
++        mtime: torrent.created_at || new Date().toISOString(),
++        mimeOrExt: ext,
++        tags: ['torbox', 'remote-indexed'],
++        added_at: new Date().toISOString(),
++        ingest_source: 'torbox',
++        virtual_folders: virtualFolders,
++        sidecarPath: `${cleanPath}.anymd`,
++        custom: {
++          backend: 'torbox',
++          torbox_id: torrent.id,
++          file_id: f.id,
++          torrent_hash: torrent.hash,
++          download_state: torrent.download_state,
++          download_finished: torrent.download_finished,
++          fetch_status: 'indexed-only'
++        }
++      };
++
++      sidecars.push(meta);
++    }
++
++    this.logRedacted('sidecar-gen', `Generated ${sidecars.length} sidecars for TorBox item [${torrent.name}]`, {
++      torrentId: torrent.id,
++      fileCount: sidecars.length
++    });
++
++    return sidecars;
++  }
++
++  /**
++   * Builds single-file download stream URL / request
++   */
++  public buildDownloadRequest(
++    torrentId: number | string,
++    fileId: number | string,
++    zip = false
++  ): { url: string; headers: Record<string, string>; fullCurlPreview: string } {
++    const endpoint = `${this.config.apiBaseUrl}/torrents/requestdl`;
++    const params = new URLSearchParams({
++      token: this.config.apiKey,
++      torrent_id: String(torrentId),
++      file_id: String(fileId),
++      zip: String(zip)
++    });
++
++    const fullUrl = `${endpoint}?${params.toString()}`;
++    const sanitizedUrl = fullUrl.replace(this.config.apiKey, '[REDACTED_KEY]');
++
++    return {
++      url: fullUrl,
++      headers: {
++        Authorization: `Bearer ${this.config.apiKey}`
++      },
++      fullCurlPreview: `curl -H "Authorization: Bearer [REDACTED_KEY]" "${sanitizedUrl}"`
++    };
++  }
++
++  /**
++   * Handoff hook to unpackr: inspects archive candidate without downloading blindly
++   */
++  public prepareUnpackrHandoff(
++    fileMeta: VaultrFileMetadata,
++    options: { maxBudgetBytes?: number; allowedExts?: string[] } = {}
++  ): { canHandoff: boolean; archivePath: string; includePatterns: string[]; reason?: string } {
++    const isArchive = ['zip', 'rar', '7z', 'tar'].some(ext =>
++      fileMeta.path.toLowerCase().endsWith(ext) || fileMeta.mimeOrExt.toLowerCase() === ext
++    );
++
++    if (!isArchive) {
++      return {
++        canHandoff: false,
++        archivePath: fileMeta.path,
++        includePatterns: [],
++        reason: 'Target is a direct media/book file, not an archive.'
++      };
++    }
++
++    const includePatterns = options.allowedExts || ['*.epub', '*.pdf', '*.mp3', '*.mp4', '*.flac'];
++
++    this.logRedacted('unpackr-handoff', `Preparing unpackr handoff for TorBox archive [${fileMeta.path}]`, {
++      path: fileMeta.path,
++      size: fileMeta.size
++    });
++
++    return {
++      canHandoff: true,
++      archivePath: fileMeta.path,
++      includePatterns
++    };
++  }
++}
++
++export default function createExtension(): IVaultrSubExtension {
++  return new TorBoxExtension();
++}
+diff --git a/extensions/torbox/types.ts b/extensions/torbox/types.ts
+new file mode 100644
+index 0000000..4ddf541
+--- /dev/null
++++ b/extensions/torbox/types.ts
+@@ -0,0 +1,34 @@
++export interface TorBoxFileItem {
++  id: number | string;
++  name: string;
++  size: number;
++  hash?: string;
++  s3_path?: string;
++  short_name?: string;
++  mimetype?: string;
++}
++
++export interface TorBoxTorrentItem {
++  id: number | string;
++  name: string;
++  size: number;
++  hash: string;
++  download_state: string; // 'completed' | 'downloading' | 'cached' | 'uploading'
++  download_finished: boolean;
++  progress: number;
++  created_at: string;
++  files: TorBoxFileItem[];
++}
++
++export interface TorBoxApiResponse<T> {
++  success: boolean;
++  error?: string;
++  detail?: string;
++  data: T;
++}
++
++export interface TorBoxClientConfig {
++  apiKey?: string;        // Bearer token (loaded from local env/config, never static UI)
++  apiBaseUrl?: string;    // Default: 'https://api.torbox.app/v1/api'
++  timeoutMs?: number;
++}
+diff --git a/registry/extensions.json b/registry/extensions.json
+index 6374473..023e6cd 100644
+--- a/registry/extensions.json
++++ b/registry/extensions.json
+@@ -110,6 +110,18 @@
+       "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/unpackr",
+       "enabledByDefault": true,
+       "capabilities": ["inspect-before-extract", "selective-pattern-extraction", "preflight-quota-guard", "auto-clean-scratch"]
++    },
++    {
++      "id": "vaultr-torbox",
++      "name": "TorBox Direct API Client & Sidecar Generator",
++      "version": "0.1.0",
++      "description": "Direct HTTPS TorBox API client inspecting remote torrent items and files, generating .anymd YAML sidecars, and selectively pulling files with unpackr integration without blind archive downloads.",
++      "category": "storage",
++      "author": "t3hkitty",
++      "entrypoint": "https://raw.githubusercontent.com/t3hkitty/vaultr-exts/main/extensions/torbox/index.ts",
++      "sourceUrl": "https://github.com/t3hkitty/vaultr-exts/tree/main/extensions/torbox",
++      "enabledByDefault": true,
++      "capabilities": ["torbox-direct-api", "bearer-token-redaction", "sidecar-first-torbox-index", "selective-torbox-download", "unpackr-handoff"]
+     }
+   ]
+ }
+diff --git a/tests/torbox.test.mjs b/tests/torbox.test.mjs
+new file mode 100644
+index 0000000..0326210
+--- /dev/null
++++ b/tests/torbox.test.mjs
+@@ -0,0 +1,132 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { TorBoxExtension } from '../dist/torbox/index.js';
++
++function createMockHost() {
++  const logs = [];
++  return {
++    log: (entry) => logs.push(entry),
++    getFiles: () => [],
++    getFileByPath: () => undefined,
++    saveSidecar: async () => {},
++    executeRclonePreview: () => {},
++    logs
++  };
++}
++
++test('TorBoxExtension safely redacts API tokens from host.log', () => {
++  const host = createMockHost();
++  const torbox = new TorBoxExtension({
++    apiKey: 'SECRET_API_KEY_12345'
++  });
++  torbox.init(host);
++
++  torbox.logRedacted('fetch', 'Requesting torrent with key SECRET_API_KEY_12345', {
++    token: 'SECRET_API_KEY_12345',
++    endpoint: '/torrents/mylist'
++  });
++
++  assert.equal(host.logs.length, 2);
++  const log = host.logs[1];
++  assert.equal(log.source, 'vaultr:torbox');
++  assert.ok(!log.message.includes('SECRET_API_KEY_12345'));
++  assert.ok(log.message.includes('[REDACTED_TORBOX_KEY]'));
++  assert.equal(log.meta.token, undefined);
++  assert.equal(log.meta.tokenRedacted, true);
++});
++
++test('TorBoxExtension parses torrents API response and generates .anymd YAML sidecars', () => {
++  const host = createMockHost();
++  const torbox = new TorBoxExtension();
++  torbox.init(host);
++
++  const mockApiResponse = {
++    success: true,
++    data: [
++      {
++        id: 101,
++        name: 'The_Expanse_Complete_EPUB',
++        size: 55000000,
++        hash: 'a1b2c3d4e5f6',
++        download_state: 'completed',
++        download_finished: true,
++        progress: 1.0,
++        created_at: '2026-11-20T12:00:00Z',
++        files: [
++          { id: 1, name: 'Leviathan_Wakes.epub', size: 2500000, hash: 'hash1' },
++          { id: 2, name: 'Calibans_War.epub', size: 2800000, hash: 'hash2' }
++        ]
++      }
++    ]
++  };
++
++  const torrents = torbox.parseTorrentsResponse(mockApiResponse);
++  assert.equal(torrents.length, 1);
++  assert.equal(torrents[0].name, 'The_Expanse_Complete_EPUB');
++
++  const sidecars = torbox.generateTorboxSidecars(torrents[0], { targetShelf: 'Scifi Books' });
++  assert.equal(sidecars.length, 2);
++  assert.equal(sidecars[0].path, 'tbox:/The_Expanse_Complete_EPUB/Leviathan_Wakes.epub');
++  assert.equal(sidecars[0].remote, 'tbox:');
++  assert.equal(sidecars[0].mimeOrExt, 'epub');
++  assert.equal(sidecars[0].ingest_source, 'torbox');
++  assert.ok(sidecars[0].virtual_folders.includes('TorBox Inbox'));
++  assert.ok(sidecars[0].virtual_folders.includes('Scifi Books'));
++  assert.equal(sidecars[0].custom.backend, 'torbox');
++  assert.equal(sidecars[0].custom.torbox_id, 101);
++});
++
++test('TorBoxExtension builds single-file requestdl URL and curl preview without leaking secret', () => {
++  const host = createMockHost();
++  const torbox = new TorBoxExtension({
++    apiKey: 'my_super_secret_token'
++  });
++  torbox.init(host);
++
++  const req = torbox.buildDownloadRequest(101, 2);
++  assert.ok(req.url.includes('torrent_id=101'));
++  assert.ok(req.url.includes('file_id=2'));
++  assert.ok(req.url.includes('token=my_super_secret_token'));
++  assert.equal(req.headers.Authorization, 'Bearer my_super_secret_token');
++  assert.ok(!req.fullCurlPreview.includes('my_super_secret_token'));
++  assert.ok(req.fullCurlPreview.includes('[REDACTED_KEY]'));
++});
++
++test('TorBoxExtension prepareUnpackrHandoff detects archives and configures includePatterns', () => {
++  const host = createMockHost();
++  const torbox = new TorBoxExtension();
++  torbox.init(host);
++
++  const archiveItem = {
++    path: 'tbox:/HugePack/bundle.zip',
++    remote: 'tbox:',
++    remotePath: 'HugePack/bundle.zip',
++    md5: 'hash999',
++    size: 8000000000,
++    mtime: '2026-11-22T00:00:00Z',
++    mimeOrExt: 'zip',
++    tags: []
++  };
++
++  const handoff = torbox.prepareUnpackrHandoff(archiveItem, {
++    allowedExts: ['*.epub', '*.pdf']
++  });
++
++  assert.equal(handoff.canHandoff, true);
++  assert.equal(handoff.archivePath, 'tbox:/HugePack/bundle.zip');
++  assert.deepEqual(handoff.includePatterns, ['*.epub', '*.pdf']);
++
++  const directEpub = {
++    path: 'tbox:/Books/single.epub',
++    remote: 'tbox:',
++    remotePath: 'Books/single.epub',
++    md5: 'hash777',
++    size: 2000000,
++    mtime: '2026-11-22T00:00:00Z',
++    mimeOrExt: 'epub',
++    tags: []
++  };
++
++  const directHandoff = torbox.prepareUnpackrHandoff(directEpub);
++  assert.equal(directHandoff.canHandoff, false);
++});
+-- 
+2.56.1
+
