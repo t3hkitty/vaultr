@@ -182,6 +182,7 @@ export * from './sidecar.js';
 export * from './dedupe.js';
 export * from './rclone.js';
 export * from './ui.js';
+export * from './sevenZip.js';
 
 // Default factory entrypoint for AnyMD bundle loader
 export default function createVaultrExtension(host: AnyMDExtensionHost): VaultrExtension {
