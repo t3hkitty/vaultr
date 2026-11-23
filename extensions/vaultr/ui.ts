@@ -29,9 +29,12 @@ export class KoofrBrowserView {
   private activeTab: 'browse' | 'dedupe' | 'sidecar' | 'extensions' = 'browse';
   private inspectingItem: VaultrFileMetadata | null = null;
   private callbacks: BrowserViewCallbacks;
+  private sortBy: 'added_at_desc' | 'added_at_asc' | 'path' | 'size' | 'mtime' = 'added_at_desc';
 
   private shelves: VaultrShelf[] = [
     { id: 'all', label: 'All Files', icon: '📂' },
+    { id: 'new-24h', label: 'New (24h)', icon: '✨' },
+    { id: 'downloads-24h', label: 'Downloads (24h)', icon: '📥' },
     { id: 'duplicates', label: 'Duplicate MD5s', icon: '👯' },
     { id: 'remotes', label: 'Remote / Mounts', icon: '☁️' },
     { id: 'docs', label: 'Books & Docs', icon: '📚' },
@@ -40,14 +43,20 @@ export class KoofrBrowserView {
 
   constructor(callbacks: BrowserViewCallbacks = {}) {
     this.callbacks = callbacks;
-    this.container = document.createElement('div');
-    this.container.className = 'vaultr-root-container';
-    this.container.setAttribute('data-vaultr-view', 'koofr');
+    if (typeof document !== 'undefined') {
+      this.container = document.createElement('div');
+      this.container.className = 'vaultr-root-container';
+      this.container.setAttribute('data-vaultr-view', 'koofr');
+    } else {
+      this.container = {} as HTMLElement;
+    }
   }
 
   public setItems(items: VaultrFileMetadata[]): void {
     this.items = items;
-    this.render();
+    if (typeof document !== 'undefined') {
+      this.render();
+    }
   }
 
   public getElement(): HTMLElement {
@@ -305,7 +314,54 @@ export class KoofrBrowserView {
     batchBar.innerHTML = `<div><strong>${filtered.length}</strong> items indexed | <strong>${selCount}</strong> selected</div>`;
 
     const actionsGroup = document.createElement('div');
-    actionsGroup.style.cssText = 'display: flex; gap: 8px;';
+    actionsGroup.style.cssText = 'display: flex; gap: 8px; align-items: center;';
+
+    // Sort Menu
+    const sortSelect = document.createElement('select');
+    sortSelect.style.cssText = 'background: #2d3748; color: #e2e8f0; border: 1px solid #4a5568; border-radius: 4px; padding: 4px 8px; font-size: 0.75rem;';
+    sortSelect.innerHTML = `
+      <option value="added_at_desc" ${this.sortBy === 'added_at_desc' ? 'selected' : ''}>Date Added (Newest)</option>
+      <option value="added_at_asc" ${this.sortBy === 'added_at_asc' ? 'selected' : ''}>Date Added (Oldest)</option>
+      <option value="path" ${this.sortBy === 'path' ? 'selected' : ''}>Path (A-Z)</option>
+      <option value="size" ${this.sortBy === 'size' ? 'selected' : ''}>Size (Largest)</option>
+      <option value="mtime" ${this.sortBy === 'mtime' ? 'selected' : ''}>Modified Time</option>
+    `;
+    sortSelect.onchange = (e) => {
+      this.sortBy = (e.target as HTMLSelectElement).value as any;
+      this.render();
+    };
+    actionsGroup.appendChild(sortSelect);
+
+    // Multi-select Virtual Folder Button
+    const vfBtn = document.createElement('button');
+    vfBtn.textContent = '+ Virtual Folder';
+    vfBtn.style.cssText = 'background: #805ad5; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer;';
+    vfBtn.onclick = () => {
+      if (this.selectedPaths.size === 0) {
+        alert('Please select files first to assign to a Virtual Folder.');
+        return;
+      }
+      const folderName = prompt('Enter Virtual Folder name (e.g., "Inbox Review", "Reading Queue"):');
+      if (!folderName) return;
+
+      for (const p of this.selectedPaths) {
+        const item = this.items.find(i => i.path === p);
+        if (item) {
+          item.virtual_folders = Array.from(new Set([...(item.virtual_folders || []), folderName]));
+        }
+      }
+      this.callbacks.onEmitLog?.({
+        timestamp: new Date().toISOString(),
+        level: 'info',
+        source: 'vaultr:virtual-folders',
+        stage: 'sidecar',
+        message: `Assigned ${this.selectedPaths.size} files to virtual folder "${folderName}". Files remain in original storage.`,
+        meta: { count: this.selectedPaths.size, virtualFolder: folderName }
+      });
+      alert(`Assigned ${this.selectedPaths.size} files to Virtual Folder "${folderName}" without moving any files.`);
+      this.render();
+    };
+    actionsGroup.appendChild(vfBtn);
 
     const lsfBtn = document.createElement('button');
     lsfBtn.textContent = 'Preview rclone lsf';
@@ -347,13 +403,24 @@ export class KoofrBrowserView {
         background: ${isSelected ? '#1e293b' : 'transparent'};
       `;
 
+      const now = Date.now();
+      const addedTime = item.added_at ? new Date(item.added_at).getTime() : 0;
+      const isUnder24h = addedTime > 0 && (now - addedTime) < (24 * 60 * 60 * 1000);
+      const isDownload = item.ingest_source === 'downloads';
+
+      const newBadge = isUnder24h ? `<span style="background: #2b6cb0; color: #fff; font-size: 0.65rem; font-weight: 700; padding: 1px 5px; border-radius: 4px; margin-right: 4px;">NEW</span>` : '';
+      const dlBadge = (isUnder24h && isDownload) ? `<span style="background: #d69e2e; color: #1a202c; font-size: 0.65rem; font-weight: 700; padding: 1px 5px; border-radius: 4px; margin-right: 4px;">DOWNLOAD</span>` : '';
+      const vfPills = (item.virtual_folders || []).map(vf => `<span style="background: #44337a; color: #d6bcfa; font-size: 0.65rem; padding: 1px 4px; border-radius: 3px; margin-left: 4px;">📁 ${vf}</span>`).join('');
+
       tr.innerHTML = `
         <td style="padding: 8px;"><input type="checkbox" ${isSelected ? 'checked' : ''} /></td>
-        <td style="padding: 8px; font-family: monospace; color: #e2e8f0;">${item.path}</td>
+        <td style="padding: 8px; font-family: monospace; color: #e2e8f0;">
+          ${newBadge}${dlBadge}${item.path} ${vfPills}
+        </td>
         <td style="padding: 8px;"><span style="background: #2d3748; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem;">${item.remote}</span></td>
         <td style="padding: 8px; color: #a0aec0;">${this.formatBytes(item.size)}</td>
         <td style="padding: 8px; font-family: monospace; font-size: 0.75rem; color: #9f7aea;">${item.md5.slice(0, 8)}...</td>
-        <td style="padding: 8px; color: #718096; font-size: 0.75rem;">${item.mtime.slice(0, 10)}</td>
+        <td style="padding: 8px; color: #718096; font-size: 0.75rem;">${item.added_at ? item.added_at.slice(0, 10) : item.mtime.slice(0, 10)}</td>
         <td style="padding: 8px; text-align: right;">
           <button class="inspect-btn" style="background: #3182ce; color: #fff; border: none; padding: 3px 6px; border-radius: 3px; font-size: 0.75rem; cursor: pointer; margin-right: 4px;">Sidecar</button>
           <button class="copyto-btn" style="background: #4a5568; color: #fff; border: none; padding: 3px 6px; border-radius: 3px; font-size: 0.75rem; cursor: pointer;">copyto</button>
@@ -481,16 +548,28 @@ sidecarPath: ${item.sidecarPath || 'none'}
   }
 
   private getFilteredItems(): VaultrFileMetadata[] {
-    return this.items.filter(item => {
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+
+    const filtered = this.items.filter(item => {
       if (this.searchQuery) {
         const q = this.searchQuery.toLowerCase();
         const matches = item.path.toLowerCase().includes(q) ||
                         item.md5.toLowerCase().includes(q) ||
                         item.remote.toLowerCase().includes(q) ||
+                        (item.virtual_folders || []).some(vf => vf.toLowerCase().includes(q)) ||
                         item.tags.some(t => t.toLowerCase().includes(q));
         if (!matches) return false;
       }
 
+      if (this.selectedShelfId === 'new-24h') {
+        const added = item.added_at ? new Date(item.added_at).getTime() : 0;
+        return added > 0 && (now - added) < dayMs;
+      }
+      if (this.selectedShelfId === 'downloads-24h') {
+        const added = item.added_at ? new Date(item.added_at).getTime() : 0;
+        return added > 0 && (now - added) < dayMs && item.ingest_source === 'downloads';
+      }
       if (this.selectedShelfId === 'remotes') {
         return item.remote.toLowerCase() !== 'local';
       }
@@ -503,10 +582,50 @@ sidecarPath: ${item.sidecarPath || 'none'}
 
       return true;
     });
+
+    // Apply sorting (Date Added, Path, Size, Modified)
+    filtered.sort((a, b) => {
+      if (this.sortBy === 'added_at_desc') {
+        const tA = a.added_at ? new Date(a.added_at).getTime() : 0;
+        const tB = b.added_at ? new Date(b.added_at).getTime() : 0;
+        return tB - tA;
+      }
+      if (this.sortBy === 'added_at_asc') {
+        const tA = a.added_at ? new Date(a.added_at).getTime() : 0;
+        const tB = b.added_at ? new Date(b.added_at).getTime() : 0;
+        return tA - tB;
+      }
+      if (this.sortBy === 'size') {
+        return (b.size || 0) - (a.size || 0);
+      }
+      if (this.sortBy === 'mtime') {
+        const tA = new Date(a.mtime).getTime() || 0;
+        const tB = new Date(b.mtime).getTime() || 0;
+        return tB - tA;
+      }
+      return a.path.localeCompare(b.path);
+    });
+
+    return filtered;
   }
 
   private computeShelfCount(shelfId: string): number {
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+
     if (shelfId === 'all') return this.items.length;
+    if (shelfId === 'new-24h') {
+      return this.items.filter(i => {
+        const added = i.added_at ? new Date(i.added_at).getTime() : 0;
+        return added > 0 && (now - added) < dayMs;
+      }).length;
+    }
+    if (shelfId === 'downloads-24h') {
+      return this.items.filter(i => {
+        const added = i.added_at ? new Date(i.added_at).getTime() : 0;
+        return added > 0 && (now - added) < dayMs && i.ingest_source === 'downloads';
+      }).length;
+    }
     if (shelfId === 'duplicates') {
       const clusters = groupDuplicatesByMd5(this.items);
       return clusters.reduce((acc, c) => acc + c.duplicateCount, 0);

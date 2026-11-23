@@ -106,6 +106,19 @@ export function serializeYamlFrontmatter(metadata: VaultrFileMetadata, notesBody
     lines.push('tags: []');
   }
 
+  if (metadata.added_at) {
+    lines.push(`added_at: "${metadata.added_at}"`);
+  }
+  if (metadata.ingest_source) {
+    lines.push(`ingest_source: ${metadata.ingest_source}`);
+  }
+  if (metadata.virtual_folders && metadata.virtual_folders.length > 0) {
+    lines.push('virtual_folders:');
+    for (const vf of metadata.virtual_folders) {
+      lines.push(`  - "${vf}"`);
+    }
+  }
+
   if (metadata.sidecarPath) {
     lines.push(`sidecarPath: ${metadata.sidecarPath}`);
   }
@@ -148,6 +161,13 @@ export function parseSidecarContent(content: string, sidecarPath?: string): Vaul
     ? frontmatter.tags.map(t => String(t).trim())
     : [];
 
+  const virtualFolders: string[] = Array.isArray(frontmatter.virtual_folders)
+    ? frontmatter.virtual_folders.map(v => String(v).trim())
+    : [];
+
+  const addedAt = frontmatter.added_at ? String(frontmatter.added_at) : undefined;
+  const ingestSource = frontmatter.ingest_source ? String(frontmatter.ingest_source) : undefined;
+
   return {
     path: path || (sidecarPath ? sidecarPath.replace(/\.anymd$/i, '') : 'unknown'),
     remote: String(frontmatter.remote || 'local'),
@@ -157,10 +177,26 @@ export function parseSidecarContent(content: string, sidecarPath?: string): Vaul
     mtime: String(frontmatter.mtime || new Date().toISOString()),
     mimeOrExt: String(frontmatter.mimeOrExt || (path ? path.split('.').pop() || 'bin' : 'bin')),
     tags,
+    added_at: addedAt,
+    ingest_source: ingestSource,
+    virtual_folders: virtualFolders,
     sidecarPath: sidecarPath || String(frontmatter.sidecarPath || ''),
     custom: Object.fromEntries(
       Object.entries(frontmatter).filter(([k]) =>
-        !['path', 'remote', 'remotePath', 'md5', 'size', 'mtime', 'mimeOrExt', 'tags', 'sidecarPath'].includes(k)
+        ![
+          'path',
+          'remote',
+          'remotePath',
+          'md5',
+          'size',
+          'mtime',
+          'mimeOrExt',
+          'tags',
+          'added_at',
+          'ingest_source',
+          'virtual_folders',
+          'sidecarPath'
+        ].includes(k)
       )
     )
   };

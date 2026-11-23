@@ -8,8 +8,8 @@ export type VaultrLogLevel = 'debug' | 'info' | 'warn' | 'error';
 export interface VaultrLogEntry {
   timestamp: string;
   level: VaultrLogLevel;
-  source: 'vaultr';
-  stage: 'init' | 'sidecar' | 'index' | 'rclone' | 'dedupe' | 'ui' | 'mount';
+  source: 'vaultr' | 'vaultr:virtual-folders' | 'vaultr:playlistr' | string;
+  stage: 'init' | 'sidecar' | 'index' | 'rclone' | 'dedupe' | 'ui' | 'mount' | string;
   message: string;
   meta?: Record<string, unknown>;
 }
@@ -38,6 +38,9 @@ export interface VaultrFileMetadata {
   mtime: string;               // ISO 8601 or UNIX timestamp string
   mimeOrExt: string;           // e.g. 'application/pdf', 'epub', 'video/mp4'
   tags: string[];              // Tags / labels
+  added_at?: string;           // Immutable ISO-8601 timestamp when indexed/ingested
+  ingest_source?: 'downloads' | 'import' | 'lsf' | 'saf' | string; // Origin hint
+  virtual_folders?: string[];  // Multi-select assigned virtual folders/shelves
   sidecarPath?: string;        // Path to the .anymd sidecar file
   custom?: Record<string, unknown>;
 }
