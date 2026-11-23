@@ -26,7 +26,7 @@ export class KoofrBrowserView {
   private selectedShelfId = 'all';
   private searchQuery = '';
   private selectedPaths = new Set<string>();
-  private activeTab: 'browse' | 'dedupe' | 'sidecar' = 'browse';
+  private activeTab: 'browse' | 'dedupe' | 'sidecar' | 'extensions' = 'browse';
   private inspectingItem: VaultrFileMetadata | null = null;
   private callbacks: BrowserViewCallbacks;
 
@@ -165,10 +165,11 @@ export class KoofrBrowserView {
     const tabGroup = document.createElement('div');
     tabGroup.style.cssText = 'display: flex; background: #2d3748; border-radius: 6px; padding: 2px;';
 
-    const tabs: Array<{ id: 'browse' | 'dedupe' | 'sidecar'; label: string }> = [
+    const tabs: Array<{ id: 'browse' | 'dedupe' | 'sidecar' | 'extensions'; label: string }> = [
       { id: 'browse', label: 'Browse' },
       { id: 'dedupe', label: 'MD5 Dedupe' },
       { id: 'sidecar', label: 'Sidecar Inspector' },
+      { id: 'extensions', label: 'Vaultr Extensions' },
     ];
 
     for (const tab of tabs) {
@@ -271,6 +272,8 @@ export class KoofrBrowserView {
       main.appendChild(this.renderDedupeView());
     } else if (this.activeTab === 'sidecar') {
       main.appendChild(this.renderSidecarInspector());
+    } else if (this.activeTab === 'extensions') {
+      main.appendChild(this.renderExtensionsView());
     } else {
       main.appendChild(this.renderFileTableView());
     }
@@ -521,4 +524,87 @@ sidecarPath: ${item.sidecarPath || 'none'}
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
   }
+
+  private renderExtensionsView(): HTMLElement {
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = `
+      <div style="background: #171922; border: 1px solid #2d3748; border-radius: 8px; padding: 16px; margin-bottom: 16px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <div>
+            <h3 style="margin: 0; color: #63b3ed; font-size: 1.1rem;">Vaultr Extension Manager</h3>
+            <p style="margin: 4px 0 0; color: #a0aec0; font-size: 0.8rem;">
+              Loaded dynamically from <a href="https://github.com/t3hkitty/vaultr-exts" target="_blank" style="color: #63b3ed; text-decoration: underline;">t3hkitty/vaultr-exts</a>.
+            </p>
+          </div>
+          <button id="vaultr-refresh-exts" style="background: #3182ce; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-size: 0.8rem; cursor: pointer;">
+            🔄 Refresh Registry
+          </button>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px;">
+        <div style="background: #1a1c23; border: 1px solid #2d3748; border-radius: 6px; padding: 12px;">
+          <div style="display: flex; justify-content: space-between;">
+            <strong style="color: #68d391;">Pandoc Converter</strong>
+            <span style="font-size: 0.7rem; background: #2d3748; padding: 2px 6px; border-radius: 4px; color: #a0aec0;">converter</span>
+          </div>
+          <p style="font-size: 0.8rem; color: #cbd5e0; margin: 8px 0;">Multi-format document conversion pipeline (epub, md, html, docx, pdf) preserving sidecar frontmatter.</p>
+          <div style="font-size: 0.75rem; color: #718096; font-family: monospace;">id: vaultr-pandoc-converter</div>
+        </div>
+
+        <div style="background: #1a1c23; border: 1px solid #2d3748; border-radius: 6px; padding: 12px;">
+          <div style="display: flex; justify-content: space-between;">
+            <strong style="color: #68d391;">Movr Organizer</strong>
+            <span style="font-size: 0.7rem; background: #2d3748; padding: 2px 6px; border-radius: 4px; color: #a0aec0;">organizer</span>
+          </div>
+          <p style="font-size: 0.8rem; color: #cbd5e0; margin: 8px 0;">Rules-based file mover into clean folder structures with dry-run rclone moveto plans and sidecar path tracking.</p>
+          <div style="font-size: 0.75rem; color: #718096; font-family: monospace;">id: vaultr-movr-organizer</div>
+        </div>
+
+        <div style="background: #1a1c23; border: 1px solid #2d3748; border-radius: 6px; padding: 12px;">
+          <div style="display: flex; justify-content: space-between;">
+            <strong style="color: #68d391;">Content Tagger</strong>
+            <span style="font-size: 0.7rem; background: #2d3748; padding: 2px 6px; border-radius: 4px; color: #a0aec0;">tagger</span>
+          </div>
+          <p style="font-size: 0.8rem; color: #cbd5e0; margin: 8px 0;">Auto-tags file contents and sidecars based on text corpora and extensions without touching original binary files.</p>
+          <div style="font-size: 0.75rem; color: #718096; font-family: monospace;">id: vaultr-content-tagger</div>
+        </div>
+
+        <div style="background: #1a1c23; border: 1px solid #2d3748; border-radius: 6px; padding: 12px;">
+          <div style="display: flex; justify-content: space-between;">
+            <strong style="color: #68d391;">Kittlibr Metadata Bridge</strong>
+            <span style="font-size: 0.7rem; background: #2d3748; padding: 2px 6px; border-radius: 4px; color: #a0aec0;">metadata</span>
+          </div>
+          <p style="font-size: 0.8rem; color: #cbd5e0; margin: 8px 0;">Symlinks and bridges rich book and document YAML metadata from Kittlibr directly into AnyMD sidecars.</p>
+          <div style="font-size: 0.75rem; color: #718096; font-family: monospace;">id: vaultr-kittlibr-metadata</div>
+        </div>
+
+        <div style="background: #1a1c23; border: 1px solid #2d3748; border-radius: 6px; padding: 12px;">
+          <div style="display: flex; justify-content: space-between;">
+            <strong style="color: #68d391;">Backup & Archive Manifest</strong>
+            <span style="font-size: 0.7rem; background: #2d3748; padding: 2px 6px; border-radius: 4px; color: #a0aec0;">backup</span>
+          </div>
+          <p style="font-size: 0.8rem; color: #cbd5e0; margin: 8px 0;">Creates backup sidecar manifests (.manifests/*.anymd) confirming file checksums, sizes, and rclone backup status.</p>
+          <div style="font-size: 0.75rem; color: #718096; font-family: monospace;">id: vaultr-backup-manifest</div>
+        </div>
+
+        <div style="background: #1a1c23; border: 1px solid #2d3748; border-radius: 6px; padding: 12px;">
+          <div style="display: flex; justify-content: space-between;">
+            <strong style="color: #68d391;">MD5 Deduplication</strong>
+            <span style="font-size: 0.7rem; background: #2d3748; padding: 2px 6px; border-radius: 4px; color: #a0aec0;">dedupe</span>
+          </div>
+          <p style="font-size: 0.8rem; color: #cbd5e0; margin: 8px 0;">Groups identical MD5 files across local and rclone remotes with keeper selection and quarantine workflows.</p>
+          <div style="font-size: 0.75rem; color: #718096; font-family: monospace;">id: vaultr-md5-dedupe</div>
+        </div>
+      </div>
+    `;
+
+    const refreshBtn = wrapper.querySelector('#vaultr-refresh-exts') as HTMLButtonElement;
+    refreshBtn.onclick = () => {
+      alert('Vaultr registry reloaded from https://raw.githubusercontent.com/t3hkitty/vaultr-exts/main/registry/extensions.json');
+    };
+
+    return wrapper;
+  }
 }
+
