@@ -1,0 +1,66 @@
+{
+  "$schema": "https://raw.githubusercontent.com/t3hkitty/anymd/main/schemas/bundle.schema.json",
+  "id": "vaultr",
+  "name": "Vaultr Vault & Remote Storage Manager",
+  "version": "0.1.0",
+  "description": "Sidecar-first file and vault manager extension for AnyMD. Designed around .anymd sidecars, YAML metadata indexing, md5 duplicate grouping, targeted rclone command builders (lsf/copyto/cat/--files-from), and Koofr-inspired shelf browsing without folder-listing limits.",
+  "author": "t3hkitty",
+  "homepage": "https://github.com/t3hkitty/vaultr",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/t3hkitty/vaultr.git"
+  },
+  "category": "storage",
+  "enabledByDefault": false,
+  "bundleType": "pointer",
+  "entrypoint": "extensions/vaultr/index.ts",
+  "dist": {
+    "module": "extensions/vaultr/index.ts",
+    "bundleUrl": "https://raw.githubusercontent.com/t3hkitty/vaultr/main/extensions/vaultr/index.ts"
+  },
+  "capabilities": [
+    "sidecar-indexing",
+    "yaml-metadata-parsing",
+    "md5-deduplication",
+    "targeted-rclone-builder",
+    "rclone-rcd-client",
+    "koofr-browser-ui",
+    "shelves-taxonomy",
+    "batch-safe-actions"
+  ],
+  "supportedRemotes": [
+    "local",
+    "Z:",
+    "T:",
+    "davjump:",
+    "koofr:",
+    "tbox:",
+    "meow-vault"
+  ],
+  "defaultSettings": {
+    "rcloneEndpoint": "http://127.0.0.1:5572",
+    "dryRunMode": true,
+    "sidecarExtension": ".anymd",
+    "defaultBrowseRemote": "local",
+    "autoIndexSidecars": true,
+    "shelves": [
+      { "id": "all", "label": "All Indexed Files", "filter": "" },
+      { "id": "duplicates", "label": "MD5 Duplicates", "filter": "isDuplicate" },
+      { "id": "remotes", "label": "Cloud & Remote Mounts", "filter": "isRemote" },
+      { "id": "books-docs", "label": "Books & Documents", "filter": "mimes:pdf,epub,md,txt" },
+      { "id": "media", "label": "Audio & Media", "filter": "mimes:mp3,mp4,flac,m4a" }
+    ]
+  },
+  "slots": [
+    {
+      "slot": "sidebar-tool",
+      "title": "Vaultr Browser",
+      "icon": "folder-lock"
+    },
+    {
+      "slot": "view-tab",
+      "title": "Vaultr Dedupe & Index",
+      "icon": "layers"
+    }
+  ]
+}

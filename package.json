@@ -1,0 +1,28 @@
+{
+  "name": "@t3hkitty/vaultr",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "AnyMD vault and remote storage pointer bundle & extension with sidecar-first indexing, md5 duplicate grouping, targeted rclone commands, and Koofr-style file browsing.",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "keywords": [
+    "anymd",
+    "vaultr",
+    "rclone",
+    "sidecar",
+    "deduplication",
+    "koofr",
+    "vault-manager"
+  ],
+  "author": "t3hkitty",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^5.9.3"
+  }
+}
