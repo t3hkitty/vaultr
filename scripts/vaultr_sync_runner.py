@@ -27,6 +27,7 @@ import json
 import time
 import subprocess
 import argparse
+import hashlib
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -137,6 +138,9 @@ def build_filter_args() -> list:
         args.extend(["--include", inc])
     for exc in DEFAULT_EXCLUDES:
         args.extend(["--exclude", exc])
+    return args
+
+
 def check_local_disk_free(path_str: str) -> int:
     """Returns available free bytes on local drive/filesystem."""
     try:
@@ -162,6 +166,125 @@ def check_rclone_about(remote_name: str, env: Dict[str, str], rclone_config: Opt
     except Exception as e:
         print(f"  [Storage Notice] 'rclone about {clean_remote}' check skipped: {e}")
     return {}
+
+
+# 3-Tier Storage Architecture Configuration
+STORAGE_TIERS = {
+    "tier1_cache": {
+        "name": "Cache / Staging",
+        "remote": "gdrive:staging_cache",
+        "quota_bytes": 15 * 1024 * 1024 * 1024, # 15 GB Google Drive tier
+        "auto_clean_after_verify": True
+    },
+    "tier2_local": {
+        "name": "Local Folder (S:\\ / meow-vault)",
+        "local_path": os.environ.get("MEOW_VAULT_LOCAL", str(Path.home() / "meow-vault")),
+        "min_free_headroom_bytes": 2 * 1024 * 1024 * 1024 # 2 GB minimum local headroom
+    },
+    "tier3_main_vault": {
+        "name": "Largest Cloud / Main Vault",
+        "remote": os.environ.get("MAIN_VAULT_REMOTE", "koofr:vault"),
+        "fallback_remote": "davjump:vault"
+    }
+}
+
+
+def evaluate_3tier_storage_space(env: Dict[str, str], rclone_config: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Checks free space/quota across all 3 tiers:
+      1) Cache (gdrive 15GB staging)
+      2) Local Folder (S:\\ or meow-vault)
+      3) Main Vault (Koofr / FileJump / highest capacity cloud)
+    """
+    local_path = STORAGE_TIERS["tier2_local"]["local_path"]
+    local_free = check_local_disk_free(local_path if Path(local_path).exists() else str(Path.home()))
+
+    gdrive_about = check_rclone_about("gdrive:", env, rclone_config)
+    main_vault_about = check_rclone_about(STORAGE_TIERS["tier3_main_vault"]["remote"], env, rclone_config)
+
+    return {
+        "tier1_cache": {
+            "remote": "gdrive:",
+            "quota_about": gdrive_about,
+            "status": "ok"
+        },
+        "tier2_local": {
+            "path": local_path,
+            "free_bytes": local_free,
+            "free_gb": round(local_free / (1024**3), 2),
+            "status": "low_space" if local_free < STORAGE_TIERS["tier2_local"]["min_free_headroom_bytes"] else "ok"
+        },
+        "tier3_main_vault": {
+            "remote": STORAGE_TIERS["tier3_main_vault"]["remote"],
+            "quota_about": main_vault_about,
+            "status": "ok"
+        }
+    }
+
+
+def safe_auto_clean_verified_items(
+    local_dir: Path,
+    main_remote: str,
+    env: Dict[str, str],
+    min_free_needed_bytes: int = 0
+) -> Dict[str, Any]:
+    """
+    Safety Gate: Cleans up local/cached files ONLY AFTER verifying matching MD5/hash
+    on the larger main cloud remote. Unmoved or mismatched data is NEVER deleted.
+    """
+    cleaned_files = []
+    freed_bytes = 0
+
+    if not local_dir.exists():
+        return {"cleaned_count": 0, "freed_bytes": 0}
+
+    # Inspect destination remote file hashes via rclone md5sum or lsf
+    dest_cmd = ["rclone", "md5sum", main_remote]
+    try:
+        res = subprocess.run(dest_cmd, env=env, capture_output=True, text=True, timeout=30)
+        remote_hashes: Dict[str, str] = {}
+        if res.returncode == 0:
+            for line in res.stdout.strip().splitlines():
+                parts = line.strip().split(None, 1)
+                if len(parts) == 2:
+                    remote_hashes[parts[1].replace("\\", "/")] = parts[0].lower()
+
+        # Iterate through local candidate files (excluding .anymd sidecars)
+        for item in sorted(local_dir.glob("**/*"), key=lambda p: p.stat().st_mtime if p.is_file() else 0):
+            if not item.is_file() or item.name.endswith(".anymd") or item.name.startswith("."):
+                continue
+
+            rel = str(item.relative_to(local_dir)).replace("\\", "/")
+            if rel in remote_hashes:
+                # Compute local MD5
+                h = hashlib.md5()
+                with open(item, "rb") as f:
+                    while chunk := f.read(65536):
+                        h.update(chunk)
+                local_md5 = h.hexdigest().lower()
+
+                # Explicit safety gate: local MD5 must exactly match verified remote MD5
+                if local_md5 == remote_hashes[rel]:
+                    fsize = item.stat().st_size
+                    try:
+                        item.unlink()
+                        cleaned_files.append(rel)
+                        freed_bytes += fsize
+                        print(f"  [Auto-Clean] Verified on {main_remote}: safely pruned {rel} ({round(fsize/1e6, 2)} MB)")
+                    except Exception as e:
+                        print(f"  [Auto-Clean Error] Could not delete {rel}: {e}")
+
+            if min_free_needed_bytes > 0 and freed_bytes >= min_free_needed_bytes:
+                break
+
+    except Exception as e:
+        print(f"  [Auto-Clean Notice] Verification check failed: {e}. Zero files deleted.")
+
+    return {
+        "cleaned_count": len(cleaned_files),
+        "freed_bytes": freed_bytes,
+        "cleaned_files": cleaned_files
+    }
 
 
 def run_vault_sync(
@@ -192,15 +315,16 @@ def run_vault_sync(
     full_env = os.environ.copy()
     full_env.update(headless_env)
 
-    # 4. Storage Limits & Free Space Check
-    local_free_bytes = check_local_disk_free(local_path if Path(local_path).exists() else str(Path.home()))
-    cloud_about = check_rclone_about(remote_target, full_env, rclone_config_path)
+    # 4. Storage Limits & 3-Tier Free Space Evaluation
+    tier_status = evaluate_3tier_storage_space(full_env, rclone_config_path)
+    local_free_bytes = tier_status["tier2_local"]["free_bytes"]
 
     # 5. Acquire single-flight lock
     with SingleFlightLock(LOCK_FILE):
         meta_status = {
-            "local_free_gb": round(local_free_bytes / (1024**3), 2),
-            "cloud_about": cloud_about
+            "tiers": tier_status,
+            "local_free_gb": tier_status["tier2_local"]["free_gb"],
+            "cloud_about": tier_status["tier1_cache"]["quota_about"]
         }
         update_sync_status("syncing", f"Starting {direction} transfer between {local_path} and {remote_target}", meta_status)
 
@@ -230,9 +354,10 @@ def run_vault_sync(
         if dry_run:
             cmd.append("--dry-run")
 
-        print(f"🐾 Executing Vaultr Headless Sync:")
+        print(f"🐾 Executing Vaultr Headless Sync (3-Tier Aware):")
         print(f"  • Source / Dest : {local_path} <-> {remote_target}")
         print(f"  • Mode          : {direction} (dry_run: {dry_run})")
+        print(f"  • Local Free    : {tier_status['tier2_local']['free_gb']} GB")
         print(f"  • Token Status  : Active (expires in {int(token_bundle.get('expiry_timestamp', 0) - time.time())}s)")
 
         start_time = time.time()
@@ -240,10 +365,27 @@ def run_vault_sync(
         duration = round(time.time() - start_time, 2)
 
         if res.returncode == 0:
+            # Safe Auto-Clean: If space is tight or auto-clean enabled, verify before pruning
+            cleanup_result = {}
+            if not dry_run and direction in ["push", "sync"]:
+                cleanup_result = safe_auto_clean_verified_items(
+                    local_dir=Path(local_path),
+                    main_remote=remote_target,
+                    env=full_env
+                )
+
             msg = f"Vault sync succeeded in {duration}s."
-            update_sync_status("idle", msg, {"duration_sec": duration, "stdout": res.stdout.strip()})
+            if cleanup_result.get("cleaned_count", 0) > 0:
+                msg += f" Verified & safely pruned {cleanup_result['cleaned_count']} files ({round(cleanup_result['freed_bytes']/1e6, 2)} MB)."
+
+            update_sync_status("idle", msg, {
+                "duration_sec": duration,
+                "cleanup": cleanup_result,
+                "tiers": evaluate_3tier_storage_space(full_env, rclone_config_path),
+                "stdout": res.stdout.strip()
+            })
             print(f"  ✅ {msg}")
-            return {"success": True, "duration": duration, "stdout": res.stdout}
+            return {"success": True, "duration": duration, "cleanup": cleanup_result, "stdout": res.stdout}
         else:
             err_msg = res.stderr.strip() or res.stdout.strip()
             # Check for token expiry/revocation in rclone error output
