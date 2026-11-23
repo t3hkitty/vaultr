@@ -208,6 +208,48 @@ export class KoofrBrowserView {
     }
     header.appendChild(tabGroup);
 
+    // Button-Triggered Headless Vault Sync Button (gdrive:meow-vault)
+    const syncBtn = document.createElement('button');
+    syncBtn.innerHTML = '⚡ Sync Vault (GDrive)';
+    syncBtn.title = 'Triggers headless rclone sync via :3050 / vaultr_sync_runner.py';
+    syncBtn.style.cssText = `
+      background: #2b6cb0;
+      color: #fff;
+      border: 1px solid #3182ce;
+      padding: 5px 12px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      border-radius: 4px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    `;
+    syncBtn.onclick = async () => {
+      syncBtn.disabled = true;
+      syncBtn.innerHTML = '⏳ Syncing...';
+      try {
+        const res = await fetch('http://127.0.0.1:3050/api/sync/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ direction: 'push' })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          alert(`✅ Vault Sync Succeeded!\n${data.message || 'Updated meow-vault on Google Drive.'}`);
+        } else {
+          const err = await res.json().catch(() => ({}));
+          alert(`⚠️ Vault Sync Notice:\n${err.detail || err.message || 'Check :3050 daemon and google_oauth_token.json.'}`);
+        }
+      } catch (e: any) {
+        alert(`❌ Cannot contact AnyMD Daemon (:3050):\n${e.message || 'Offline'}\nEnsure start_kittlibr.py or anymd_daemon.py is running.`);
+      } finally {
+        syncBtn.disabled = false;
+        syncBtn.innerHTML = '⚡ Sync Vault (GDrive)';
+      }
+    };
+    header.appendChild(syncBtn);
+
     return header;
   }
 
