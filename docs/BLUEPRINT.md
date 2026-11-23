@@ -16,3 +16,4 @@ Refer to the complete, structured master specification in the repo:
 8. **`playlistr` Dynamic Shelf Playlist Builder** with extended `.m3u8` export for VLC on Windows and Android.
 9. **Free-Tier Intermediary Staging Bridge** (`vaultr-staging-bridge`) with Pack-First, Quota Guard, and Clear-After-Verify rules.
 10. **`unpackr` Selective Extractor & Quota Guard** (`7z l -slt` inspection, extension filters, pre-flight budget checks, and scratch auto-cleanup).
+11. **`torbox` Direct HTTPS API Utility** (bearer token redaction in `host.log`, item/file inspection, `.anymd` sidecar generation, and `unpackr` handoff without blind multi-GB downloads).
