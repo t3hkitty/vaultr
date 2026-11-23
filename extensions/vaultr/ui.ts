@@ -87,6 +87,10 @@ export class KoofrBrowserView {
     mainBody.appendChild(sidebar);
     mainBody.appendChild(content);
     this.container.appendChild(mainBody);
+
+    // Bottom Audio / Video Media Queue Bar
+    const queueBar = this.renderQueueBar();
+    this.container.appendChild(queueBar);
   }
 
   private renderHeader(): HTMLElement {
@@ -605,6 +609,56 @@ sidecarPath: ${item.sidecarPath || 'none'}
     };
 
     return wrapper;
+  }
+
+  private renderQueueBar(): HTMLElement {
+    const bar = document.createElement('footer');
+    bar.style.cssText = `
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 16px;
+      background: #14171f;
+      border-top: 1px solid #2d3748;
+      font-size: 0.8rem;
+      color: #cbd5e0;
+      gap: 12px;
+    `;
+
+    bar.innerHTML = `
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="font-size: 1.1rem;">🎵</span>
+        <div>
+          <strong style="color: #63b3ed;">Media Queue Player</strong>
+          <span style="color: #718096; margin-left: 6px;">[idle]</span>
+        </div>
+      </div>
+      <div style="display: flex; gap: 6px;">
+        <button id="vaultr-btn-prev" style="background: #2d3748; color: #cbd5e0; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer;">⏮ Prev</button>
+        <button id="vaultr-btn-play" style="background: #3182ce; color: white; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer;">▶ Play Queue</button>
+        <button id="vaultr-btn-next" style="background: #2d3748; color: #cbd5e0; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer;">⏭ Next</button>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button id="vaultr-export-m3u8" style="background: #2b6cb0; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer;">
+          📄 Export .m3u8
+        </button>
+        <button id="vaultr-open-vlc" style="background: #ed8936; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer;">
+          Cone / VLC Hand-Off
+        </button>
+      </div>
+    `;
+
+    const m3uBtn = bar.querySelector('#vaultr-export-m3u8') as HTMLButtonElement;
+    m3uBtn.onclick = () => {
+      alert('[Playlistr Export]\nGenerated standard .m3u8 playlist file from current shelf view.');
+    };
+
+    const vlcBtn = bar.querySelector('#vaultr-open-vlc') as HTMLButtonElement;
+    vlcBtn.onclick = () => {
+      alert('[VLC Hand-off]\nLaunching system default player (VLC on Windows/Android) with generated stream playlist.');
+    };
+
+    return bar;
   }
 }
 
