@@ -137,7 +137,31 @@ def build_filter_args() -> list:
         args.extend(["--include", inc])
     for exc in DEFAULT_EXCLUDES:
         args.extend(["--exclude", exc])
-    return args
+def check_local_disk_free(path_str: str) -> int:
+    """Returns available free bytes on local drive/filesystem."""
+    try:
+        import shutil
+        total, used, free = shutil.disk_usage(path_str)
+        return free
+    except Exception:
+        return 10 * 1024 * 1024 * 1024  # Default fallback 10GB
+
+
+def check_rclone_about(remote_name: str, env: Dict[str, str], rclone_config: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Queries `rclone about <remote> --json` to inspect remote quota, used, and free bytes.
+    """
+    clean_remote = remote_name.split(":")[0] + ":"
+    cmd = ["rclone", "about", clean_remote, "--json"]
+    if rclone_config:
+        cmd.extend(["--config", rclone_config])
+    try:
+        res = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=10)
+        if res.returncode == 0 and res.stdout.strip():
+            return json.loads(res.stdout.strip())
+    except Exception as e:
+        print(f"  [Storage Notice] 'rclone about {clean_remote}' check skipped: {e}")
+    return {}
 
 
 def run_vault_sync(
@@ -168,9 +192,17 @@ def run_vault_sync(
     full_env = os.environ.copy()
     full_env.update(headless_env)
 
-    # 4. Acquire single-flight lock
+    # 4. Storage Limits & Free Space Check
+    local_free_bytes = check_local_disk_free(local_path if Path(local_path).exists() else str(Path.home()))
+    cloud_about = check_rclone_about(remote_target, full_env, rclone_config_path)
+
+    # 5. Acquire single-flight lock
     with SingleFlightLock(LOCK_FILE):
-        update_sync_status("syncing", f"Starting {direction} transfer between {local_path} and {remote_target}")
+        meta_status = {
+            "local_free_gb": round(local_free_bytes / (1024**3), 2),
+            "cloud_about": cloud_about
+        }
+        update_sync_status("syncing", f"Starting {direction} transfer between {local_path} and {remote_target}", meta_status)
 
         cmd = ["rclone"]
         if direction == "push":
