@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://meow.artkitty.net/schemas/identity-disambiguation.v1.json",
+  "title": "AnyMD & KitLib Entry Disambiguation Rule",
+  "type": "object",
+  "required": ["uid", "title", "medium", "creator_display", "disambiguators", "dedupe_policy"],
+  "properties": {
+    "uid": { "type": "string", "minLength": 4 },
+    "title": { "type": "string", "minLength": 1 },
+    "medium": {
+      "type": "string",
+      "enum": [
+        "light_novel",
+        "manga",
+        "web_novel",
+        "audiobook",
+        "general_ebook",
+        "art_asset",
+        "note"
+      ]
+    },
+    "creator_display": { "type": "string", "minLength": 1 },
+    "creator_id": { "type": ["string", "null"] },
+    "disambiguators": {
+      "type": "object",
+      "properties": {
+        "series": { "type": ["string", "null"] },
+        "volume": { "type": ["number", "string", "null"] },
+        "year": { "type": ["integer", "null"] },
+        "publisher_or_source": { "type": ["string", "null"] },
+        "identifier": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "dedupe_policy": {
+      "type": "object",
+      "required": ["on_same_identity_key", "on_name_collision_diff_context", "on_ambiguous_match"],
+      "properties": {
+        "on_same_identity_key": { "type": "string", "const": "alt_format_single_entry" },
+        "on_name_collision_diff_context": { "type": "string", "const": "keep_separate" },
+        "on_ambiguous_match": { "type": "string", "const": "quarantine_review" }
+      },
+      "additionalProperties": false
+    },
+    "review_status": {
+      "type": "string",
+      "enum": ["none", "quarantined_alt_format_review", "quarantined_name_collision"],
+      "default": "none"
+    },
+    "alt_formats": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "format"],
+        "properties": {
+          "path": { "type": "string" },
+          "format": { "type": "string" },
+          "role": { "type": "string" },
+          "alt_score": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "creator_id": { "type": "null" } },
+        "required": ["creator_id"]
+      },
+      "then": {
+        "properties": {
+          "dedupe_policy": {
+            "properties": { "on_same_identity_key": { "const": "quarantine_review" } }
+          }
+        }
+      }
+    }
+  ]
+}

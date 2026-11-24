@@ -45,6 +45,28 @@ export interface VaultrFileMetadata {
   asset_stem?: string;         // Normalized base name for rendition families
   renditions?: Record<string, string>; // e.g. { source_master: "...", vector_master: "...", print_export: "...", web_preview: "..." }
   rendition_role?: 'source_master' | 'vector_master' | 'print_export' | 'web_preview' | 'sister_rendition' | string;
+  
+  // Secondary Disambiguators & Identity Keys (The Carol Smythson rule)
+  uid?: string;                // Stable unique ID (e.g. klib-z20261123-1807-9f3a21)
+  creator_display?: string;    // Display name of author / artist
+  creator_id?: string;         // Canonical ID; never auto-set on name match alone
+  disambiguators?: {
+    series?: string;
+    volume?: number | string;
+    year?: number | string;
+    publisher_or_source?: string;
+    identifier?: string; // ISBN, DOI, canonical URL, archive ID
+    context?: string;    // work, fiction, archive, reference
+  };
+  identity_key?: string;       // e.g. "light_novel::cr_carol_smythson_01::ashen_loom::v001::2025"
+  dedupe_policy?: {
+    on_same_identity_key?: 'alt_format_single_entry' | string;
+    on_name_collision_diff_context?: 'keep_separate' | string;
+    on_ambiguous_match?: 'quarantine_review' | string;
+  };
+  review_status?: 'none' | 'quarantined_alt_format_review' | 'quarantined_name_collision' | string;
+  alt_formats?: string[];      // Linked alternate formats
+  dev_notes?: string[];        // Diagnostic & origin history notes
   custom?: Record<string, unknown>;
 }
 
@@ -63,6 +85,8 @@ export interface AssetFamily {
   renditions: Record<string, VaultrFileMetadata>;
   webPreview?: VaultrFileMetadata;
   sourceMaster?: VaultrFileMetadata;
+  identityKey?: string;
+  disambiguatorSummary?: string;
 }
 
 /**

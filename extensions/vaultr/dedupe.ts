@@ -8,6 +8,18 @@ import type {
   RenditionRole
 } from './types.js';
 
+/**
+ * Vaultr Deduplication & Rendition Engine
+ *
+ * 📝 DEV NOTES (Architect Origin):
+ * This architecture exists because the architect of AnyMD was (shock!!) utterly obsessed
+ * with Markdown and converted all their text documents, notes, and chapters into .md files
+ * while intentionally preserving original binary files (.epub, .pdf, .txt, .kra).
+ * Naive deduplicators would treat book.epub and book.md as redundant duplicates.
+ * The Stem-Grouped Rendition Model and Pillar V Sweep Immunity guarantee that .md
+ * sister files and source masters are forever protected from duplicate sweeps.
+ */
+
 export interface DedupeOptions {
   quarantineDir?: string;
   preferredRemotesOrder?: string[]; // e.g. ['local', 'Z:', 'T:', 'koofr:', 'davjump:']
@@ -204,7 +216,42 @@ export function calculateAltFormatLikelihood(
     reasons.push(isArtPair ? 'Known art rendition bridge (master/vector/export)' : 'Known book/notes sister pair');
   }
 
-  // 5. Metadata Agreement (+0.15)
+  // 5. Metadata & Identity Key Agreement (+0.15, or override)
+  // Check Identity Key (The Carol Smythson Rule):
+  // Same creator name + Different Series / Year / Context -> DO NOT MERGE / KEEP SEPARATE
+  const creatorA = fileA.creator_display || String(fileA.custom?.author || '').trim().toLowerCase();
+  const creatorB = fileB.creator_display || String(fileB.custom?.author || '').trim().toLowerCase();
+  const seriesA = fileA.disambiguators?.series || String(fileA.custom?.series || '').trim().toLowerCase();
+  const seriesB = fileB.disambiguators?.series || String(fileB.custom?.series || '').trim().toLowerCase();
+  const yearA = fileA.disambiguators?.year || fileA.custom?.year;
+  const yearB = fileB.disambiguators?.year || fileB.custom?.year;
+
+  // Exact identity key match: definitive confirmation of same work
+  if (fileA.identity_key && fileB.identity_key && fileA.identity_key === fileB.identity_key) {
+    score = 1.0;
+    reasons.push(`Exact identity_key match [${fileA.identity_key}]`);
+    return {
+      score: 1.0,
+      isCompatibleMedium: true,
+      category: 'rendition_family',
+      reasons
+    };
+  }
+
+  // Name collision detection: same author name but conflicting series or year
+  const isNameCollision = creatorA && creatorB && creatorA === creatorB &&
+    ((seriesA && seriesB && seriesA !== seriesB) || (yearA && yearB && yearA !== yearB));
+
+  if (isNameCollision) {
+    reasons.push(`Carol Smythson name collision safeguard: same author "${creatorA}" but different series/year ("${seriesA}" vs "${seriesB}")`);
+    return {
+      score: 0.15,
+      isCompatibleMedium: false,
+      category: 'distinct_work',
+      reasons
+    };
+  }
+
   const hasSharedTags = fileA.tags?.some(t => fileB.tags?.includes(t));
   if (hasSharedTags || (fileA.custom?.author && fileA.custom?.author === fileB.custom?.author)) {
     score += 0.15;
@@ -234,6 +281,27 @@ export function calculateAltFormatLikelihood(
 }
 
 /**
+ * Generates an immutable canonical identity_key for a work
+ * e.g. "light_novel::cr_carol_smythson_01::ashen_loom::v001::2025"
+ */
+export function computeIdentityKey(metadata: VaultrFileMetadata): string {
+  if (metadata.identity_key) return metadata.identity_key;
+
+  const medium = detectFileMedium(metadata.path, metadata.mimeOrExt);
+  const creator = metadata.creator_id ||
+    (metadata.creator_display ? metadata.creator_display.toLowerCase().replace(/[^a-z0-9]+/g, '_') : 'unknown_creator');
+  const series = metadata.disambiguators?.series
+    ? metadata.disambiguators.series.toLowerCase().replace(/[^a-z0-9]+/g, '_')
+    : metadata.asset_stem || extractAssetStem(metadata.path);
+  const vol = metadata.disambiguators?.volume !== undefined
+    ? `v${String(metadata.disambiguators.volume).padStart(3, '0')}`
+    : 'v001';
+  const year = metadata.disambiguators?.year || 'undated';
+
+  return `${medium}::${creator}::${series}::${vol}::${year}`;
+}
+
+/**
  * Groups files sharing the same normalized asset stem into Asset Families (Rendition Groups)
  * Prevents sister files (.md + .epub) and multi-format art pipelines from being flagged as duplicates.
  */
@@ -244,15 +312,16 @@ export function groupAssetFamilies(
   const map = new Map<string, VaultrFileMetadata[]>();
 
   for (const item of items) {
-    const stem = item.asset_stem || extractAssetStem(item.path);
-    const group = map.get(stem) || [];
+    // If an explicit identity_key is present, use it to disambiguate name collisions
+    const groupingKey = item.identity_key || item.asset_stem || extractAssetStem(item.path);
+    const group = map.get(groupingKey) || [];
     group.push(item);
-    map.set(stem, group);
+    map.set(groupingKey, group);
   }
 
   const families: AssetFamily[] = [];
 
-  for (const [stem, fileList] of map.entries()) {
+  for (const [key, fileList] of map.entries()) {
     const renditions: Record<string, VaultrFileMetadata> = {};
     let webPreview: VaultrFileMetadata | undefined;
     let sourceMaster: VaultrFileMetadata | undefined;
@@ -264,7 +333,15 @@ export function groupAssetFamilies(
       if (role === 'source_master' && !sourceMaster) sourceMaster = f;
     }
 
+    const first = fileList[0];
+    const stem = first.asset_stem || extractAssetStem(first.path);
     const title = stem.replace(/_|-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+
+    const disambigParts = [
+      first.disambiguators?.year ? `${first.disambiguators.year}` : '',
+      first.disambiguators?.series ? `${first.disambiguators.series}` : '',
+      first.mimeOrExt ? first.mimeOrExt.toUpperCase() : ''
+    ].filter(Boolean);
 
     families.push({
       asset_stem: stem,
@@ -272,7 +349,9 @@ export function groupAssetFamilies(
       items: fileList,
       renditions,
       webPreview: webPreview || fileList.find(f => /\.(png|webp|jpg|jpeg)$/i.test(f.path)),
-      sourceMaster: sourceMaster || fileList.find(f => /\.(kra|psd|clip|svg|afdesign)$/i.test(f.path))
+      sourceMaster: sourceMaster || fileList.find(f => /\.(kra|psd|clip|svg|afdesign)$/i.test(f.path)),
+      identityKey: first.identity_key || computeIdentityKey(first),
+      disambiguatorSummary: disambigParts.length > 0 ? `[${disambigParts.join(' • ')}]` : undefined
     });
   }
 

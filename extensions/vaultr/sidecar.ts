@@ -147,6 +147,43 @@ export function serializeYamlFrontmatter(metadata: VaultrFileMetadata, notesBody
     }
   }
 
+  if (metadata.uid) {
+    lines.push(`uid: "${metadata.uid}"`);
+  }
+  if (metadata.creator_display) {
+    lines.push(`creator_display: "${metadata.creator_display}"`);
+  }
+  if (metadata.creator_id) {
+    lines.push(`creator_id: "${metadata.creator_id}"`);
+  }
+  if (metadata.identity_key) {
+    lines.push(`identity_key: "${metadata.identity_key}"`);
+  }
+  if (metadata.review_status) {
+    lines.push(`review_status: "${metadata.review_status}"`);
+  }
+  if (metadata.disambiguators && Object.keys(metadata.disambiguators).length > 0) {
+    lines.push('disambiguators:');
+    for (const [k, v] of Object.entries(metadata.disambiguators)) {
+      if (v !== undefined && v !== null) {
+        lines.push(`  ${k}: ${typeof v === 'string' ? `"${v}"` : v}`);
+      }
+    }
+  }
+  if (metadata.dedupe_policy && Object.keys(metadata.dedupe_policy).length > 0) {
+    lines.push('dedupe_policy:');
+    for (const [k, v] of Object.entries(metadata.dedupe_policy)) {
+      lines.push(`  ${k}: "${v}"`);
+    }
+  }
+
+  if (metadata.dev_notes && metadata.dev_notes.length > 0) {
+    lines.push('dev_notes:');
+    for (const note of metadata.dev_notes) {
+      lines.push(`  - "${note.replace(/"/g, '\\"')}"`);
+    }
+  }
+
   if (metadata.sidecarPath) {
     lines.push(`sidecarPath: ${metadata.sidecarPath}`);
   }
@@ -181,7 +218,7 @@ export function parseSidecarContent(content: string, sidecarPath?: string): Vaul
   const path = String(frontmatter.path || '');
   const md5 = String(frontmatter.md5 || '').toLowerCase().trim();
 
-  if (!path && !md5) {
+  if (!path && !md5 && !frontmatter.uid) {
     return null;
   }
 
@@ -206,6 +243,21 @@ export function parseSidecarContent(content: string, sidecarPath?: string): Vaul
     }
   }
 
+  const uid = frontmatter.uid ? String(frontmatter.uid) : undefined;
+  const creatorDisplay = frontmatter.creator_display ? String(frontmatter.creator_display) : undefined;
+  const creatorId = frontmatter.creator_id ? String(frontmatter.creator_id) : undefined;
+  const identityKey = frontmatter.identity_key ? String(frontmatter.identity_key) : undefined;
+  const reviewStatus = frontmatter.review_status ? String(frontmatter.review_status) : undefined;
+  const disambiguators = frontmatter.disambiguators && typeof frontmatter.disambiguators === 'object'
+    ? (frontmatter.disambiguators as Record<string, unknown>)
+    : undefined;
+  const dedupePolicy = frontmatter.dedupe_policy && typeof frontmatter.dedupe_policy === 'object'
+    ? (frontmatter.dedupe_policy as Record<string, string>)
+    : undefined;
+  const devNotes: string[] = Array.isArray(frontmatter.dev_notes)
+    ? frontmatter.dev_notes.map(n => String(n).trim())
+    : [];
+
   return {
     path: path || (sidecarPath ? sidecarPath.replace(/\.anymd$/i, '') : 'unknown'),
     remote: String(frontmatter.remote || 'local'),
@@ -222,6 +274,14 @@ export function parseSidecarContent(content: string, sidecarPath?: string): Vaul
     asset_stem: assetStem,
     rendition_role: renditionRole,
     renditions,
+    uid,
+    creator_display: creatorDisplay,
+    creator_id: creatorId,
+    identity_key: identityKey,
+    disambiguators: disambiguators as any,
+    dedupe_policy: dedupePolicy as any,
+    review_status: reviewStatus as any,
+    dev_notes: devNotes.length > 0 ? devNotes : undefined,
     custom: Object.fromEntries(
       Object.entries(frontmatter).filter(([k]) =>
         ![
@@ -239,7 +299,16 @@ export function parseSidecarContent(content: string, sidecarPath?: string): Vaul
           'sidecarPath',
           'asset_stem',
           'rendition_role',
-          'renditions'
+          'renditions',
+          'uid',
+          'creator_display',
+          'creator_id',
+          'identity_key',
+          'disambiguators',
+          'dedupe_policy',
+          'review_status',
+          'alt_formats',
+          'dev_notes'
         ].includes(k)
       )
     )

@@ -544,11 +544,20 @@ export class KoofrBrowserView {
       const newBadge = isUnder24h ? `<span style="background: #2b6cb0; color: #fff; font-size: 0.65rem; font-weight: 700; padding: 1px 5px; border-radius: 4px; margin-right: 4px;">NEW</span>` : '';
       const dlBadge = (isUnder24h && isDownload) ? `<span style="background: #d69e2e; color: #1a202c; font-size: 0.65rem; font-weight: 700; padding: 1px 5px; border-radius: 4px; margin-right: 4px;">DOWNLOAD</span>` : '';
       const vfPills = (item.virtual_folders || []).map(vf => `<span style="background: #44337a; color: #d6bcfa; font-size: 0.65rem; padding: 1px 4px; border-radius: 3px; margin-left: 4px;">📁 ${vf}</span>`).join('');
+      
+      // Secondary Disambiguator Pill (Carol Smythson safeguard)
+      const creator = item.creator_display || (item.custom?.author ? String(item.custom.author) : '');
+      const series = item.disambiguators?.series || (item.custom?.series ? String(item.custom.series) : '');
+      const year = item.disambiguators?.year || item.custom?.year;
+      const disambigTag = creator || series || year
+        ? `<div style="font-size: 0.72rem; color: #a0aec0; margin-top: 2px;">👤 ${creator || 'Author'}${series ? ` • <em>${series}</em>` : ''}${year ? ` (${year})` : ''}</div>`
+        : '';
 
       tr.innerHTML = `
         <td style="padding: 8px;"><input type="checkbox" ${isSelected ? 'checked' : ''} /></td>
         <td style="padding: 8px; font-family: monospace; color: #e2e8f0;">
           ${newBadge}${dlBadge}${item.path} ${vfPills}
+          ${disambigTag}
         </td>
         <td style="padding: 8px;"><span style="background: #2d3748; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem;">${item.remote}</span></td>
         <td style="padding: 8px; color: #a0aec0;">${this.formatBytes(item.size)}</td>

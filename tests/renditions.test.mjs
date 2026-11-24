@@ -208,3 +208,64 @@ renditions:
   assert.ok(serialized.includes('rendition_role: source_master'));
   assert.ok(serialized.includes('web_preview: "art-chan/thumbs/buzzed_stitch_thumb.webp"'));
 });
+
+test('Carol Smythson name collision safeguard keeps two distinct authors separate', () => {
+  // Author 1: Carol Smythson writing "Ashen Loom" (2025)
+  const author1 = {
+    uid: 'klib-z20261123-1807-9f3a21',
+    path: 'novels/ashen_loom_vol1.epub',
+    remote: 'local',
+    remotePath: 'novels/ashen_loom_vol1.epub',
+    md5: 'md5_ashen',
+    size: 1200000,
+    mtime: '2026-11-20T10:00:00Z',
+    mimeOrExt: 'epub',
+    tags: ['fantasy'],
+    creator_display: 'Carol Smythson',
+    creator_id: 'cr_carol_smythson_01',
+    disambiguators: {
+      series: 'Ashen Loom',
+      volume: 1,
+      year: 2025
+    },
+    identity_key: 'light_novel::cr_carol_smythson_01::ashen_loom::v001::2025',
+    dedupe_policy: {
+      on_same_identity_key: 'alt_format_single_entry',
+      on_name_collision_diff_context: 'keep_separate',
+      on_ambiguous_match: 'quarantine_review'
+    }
+  };
+
+  // Author 2: Different Carol Smythson writing "Echoes of the Past" (2021)
+  const author2 = {
+    uid: 'klib-z20261123-1807-888bb1',
+    path: 'novels/echoes_of_the_past.epub',
+    remote: 'local',
+    remotePath: 'novels/echoes_of_the_past.epub',
+    md5: 'md5_echoes',
+    size: 980000,
+    mtime: '2026-11-20T10:00:00Z',
+    mimeOrExt: 'epub',
+    tags: ['historical'],
+    creator_display: 'Carol Smythson',
+    creator_id: 'cr_carol_smythson_02',
+    disambiguators: {
+      series: 'Echoes of the Past',
+      volume: 1,
+      year: 2021
+    },
+    identity_key: 'general_ebook::cr_carol_smythson_02::echoes_of_the_past::v001::2021',
+    dedupe_policy: {
+      on_same_identity_key: 'alt_format_single_entry',
+      on_name_collision_diff_context: 'keep_separate',
+      on_ambiguous_match: 'quarantine_review'
+    }
+  };
+
+  const collisionResult = calculateAltFormatLikelihood(author1, author2);
+  // Must NOT be classified as duplicate or rendition family
+  assert.equal(collisionResult.category, 'distinct_work');
+  assert.equal(collisionResult.isCompatibleMedium, false);
+  assert.ok(collisionResult.reasons.some(r => r.includes('Carol Smythson name collision safeguard')));
+});
+
