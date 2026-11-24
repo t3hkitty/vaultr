@@ -42,7 +42,27 @@ export interface VaultrFileMetadata {
   ingest_source?: 'downloads' | 'import' | 'lsf' | 'saf' | string; // Origin hint
   virtual_folders?: string[];  // Multi-select assigned virtual folders/shelves
   sidecarPath?: string;        // Path to the .anymd sidecar file
+  asset_stem?: string;         // Normalized base name for rendition families
+  renditions?: Record<string, string>; // e.g. { source_master: "...", vector_master: "...", print_export: "...", web_preview: "..." }
+  rendition_role?: 'source_master' | 'vector_master' | 'print_export' | 'web_preview' | 'sister_rendition' | string;
   custom?: Record<string, unknown>;
+}
+
+export type RenditionRole =
+  | 'source_master'
+  | 'vector_master'
+  | 'print_export'
+  | 'web_preview'
+  | 'sister_rendition'
+  | string;
+
+export interface AssetFamily {
+  asset_stem: string;
+  title: string;
+  items: VaultrFileMetadata[];
+  renditions: Record<string, VaultrFileMetadata>;
+  webPreview?: VaultrFileMetadata;
+  sourceMaster?: VaultrFileMetadata;
 }
 
 /**

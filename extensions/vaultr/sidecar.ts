@@ -21,6 +21,7 @@ export function parseYamlFrontmatter(content: string): { frontmatter: Record<str
 
   const lines = rawYaml.split(/\r?\n/);
   let currentArrayKey: string | null = null;
+  let currentDictKey: string | null = null;
   let currentArray: unknown[] = [];
 
   for (const line of lines) {
@@ -31,27 +32,38 @@ export function parseYamlFrontmatter(content: string): { frontmatter: Record<str
 
     // List item under an array key
     if (trimmedLine.startsWith('- ') && currentArrayKey) {
+      currentDictKey = null; // We are definitely in an array, not a dictionary
       const val = trimmedLine.slice(2).trim();
       currentArray.push(parseYamlScalar(val));
       continue;
     }
 
-    // New key-value pair
     const colonIdx = trimmedLine.indexOf(':');
     if (colonIdx > 0) {
+      const isIndented = line.startsWith('  ') || line.startsWith('\t');
+      const key = trimmedLine.slice(0, colonIdx).trim();
+      const rawValue = trimmedLine.slice(colonIdx + 1).trim();
+
+      // If we are currently collecting a nested dictionary (e.g. renditions:)
+      if (isIndented && currentDictKey) {
+        if (!frontmatter[currentDictKey] || typeof frontmatter[currentDictKey] !== 'object') {
+          frontmatter[currentDictKey] = {};
+        }
+        (frontmatter[currentDictKey] as Record<string, unknown>)[key] = parseYamlScalar(rawValue);
+        continue;
+      }
+
       // Flush previous array if active
       if (currentArrayKey) {
         frontmatter[currentArrayKey] = currentArray;
         currentArrayKey = null;
         currentArray = [];
       }
-
-      const key = trimmedLine.slice(0, colonIdx).trim();
-      const rawValue = trimmedLine.slice(colonIdx + 1).trim();
+      currentDictKey = null;
 
       if (rawValue === '') {
-        // Potential list starter
         currentArrayKey = key;
+        currentDictKey = key;
         currentArray = [];
       } else if (rawValue.startsWith('[') && rawValue.endsWith(']')) {
         // Inline flow sequence: [a, b, c]
@@ -65,7 +77,10 @@ export function parseYamlFrontmatter(content: string): { frontmatter: Record<str
   }
 
   if (currentArrayKey) {
-    frontmatter[currentArrayKey] = currentArray;
+    // If dictionary wasn't populated for this key, keep the array
+    if (!frontmatter[currentArrayKey] || Array.isArray(frontmatter[currentArrayKey])) {
+      frontmatter[currentArrayKey] = currentArray;
+    }
   }
 
   return { frontmatter, body };
@@ -119,6 +134,19 @@ export function serializeYamlFrontmatter(metadata: VaultrFileMetadata, notesBody
     }
   }
 
+  if (metadata.asset_stem) {
+    lines.push(`asset_stem: ${metadata.asset_stem}`);
+  }
+  if (metadata.rendition_role) {
+    lines.push(`rendition_role: ${metadata.rendition_role}`);
+  }
+  if (metadata.renditions && Object.keys(metadata.renditions).length > 0) {
+    lines.push('renditions:');
+    for (const [role, rPath] of Object.entries(metadata.renditions)) {
+      lines.push(`  ${role}: "${rPath}"`);
+    }
+  }
+
   if (metadata.sidecarPath) {
     lines.push(`sidecarPath: ${metadata.sidecarPath}`);
   }
@@ -167,6 +195,16 @@ export function parseSidecarContent(content: string, sidecarPath?: string): Vaul
 
   const addedAt = frontmatter.added_at ? String(frontmatter.added_at) : undefined;
   const ingestSource = frontmatter.ingest_source ? String(frontmatter.ingest_source) : undefined;
+  const assetStem = frontmatter.asset_stem ? String(frontmatter.asset_stem) : undefined;
+  const renditionRole = frontmatter.rendition_role ? String(frontmatter.rendition_role) : undefined;
+
+  let renditions: Record<string, string> | undefined;
+  if (frontmatter.renditions && typeof frontmatter.renditions === 'object') {
+    renditions = {};
+    for (const [k, v] of Object.entries(frontmatter.renditions as Record<string, unknown>)) {
+      renditions[k] = String(v);
+    }
+  }
 
   return {
     path: path || (sidecarPath ? sidecarPath.replace(/\.anymd$/i, '') : 'unknown'),
@@ -181,6 +219,9 @@ export function parseSidecarContent(content: string, sidecarPath?: string): Vaul
     ingest_source: ingestSource,
     virtual_folders: virtualFolders,
     sidecarPath: sidecarPath || String(frontmatter.sidecarPath || ''),
+    asset_stem: assetStem,
+    rendition_role: renditionRole,
+    renditions,
     custom: Object.fromEntries(
       Object.entries(frontmatter).filter(([k]) =>
         ![
@@ -195,7 +236,10 @@ export function parseSidecarContent(content: string, sidecarPath?: string): Vaul
           'added_at',
           'ingest_source',
           'virtual_folders',
-          'sidecarPath'
+          'sidecarPath',
+          'asset_stem',
+          'rendition_role',
+          'renditions'
         ].includes(k)
       )
     )
