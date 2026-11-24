@@ -248,7 +248,58 @@ export class KoofrBrowserView {
         syncBtn.innerHTML = '⚡ Sync Vault (GDrive)';
       }
     };
-    header.appendChild(syncBtn);
+    // Native Directory Mount Button (Web File System Access API / Android SAF Tree)
+    const mountBtn = document.createElement('button');
+    mountBtn.innerHTML = '📂 Mount Folder (SAF)';
+    mountBtn.title = 'Select directory via native Storage Access Framework (SAF) / File System Access API (no .txt filter locks)';
+    mountBtn.style.cssText = `
+      background: #4a5568;
+      color: #fff;
+      border: 1px solid #718096;
+      padding: 5px 10px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      border-radius: 4px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    `;
+    mountBtn.onclick = async () => {
+      if (typeof window !== 'undefined' && 'showDirectoryPicker' in window) {
+        try {
+          const dirHandle = await (window as any).showDirectoryPicker();
+          alert(`✅ Mounted directory: ${dirHandle.name}\nReading sidecars & documents without file extension restrictions.`);
+        } catch (e: any) {
+          if (e.name !== 'AbortError') alert(`Directory picker notice: ${e.message}`);
+        }
+      } else {
+        alert('Storage Access Framework (SAF) / File System Access API:\nUse the native OS folder picker to grant scoped vault permissions.');
+      }
+    };
+    header.appendChild(mountBtn);
+
+    // Explorer Reveal Button
+    const explorerBtn = document.createElement('button');
+    explorerBtn.innerHTML = '🪟 File Explorer';
+    explorerBtn.title = 'Reveal vault location in Windows File Explorer or Quick Access';
+    explorerBtn.style.cssText = `
+      background: #2d3748;
+      color: #e2e8f0;
+      border: 1px solid #4a5568;
+      padding: 5px 10px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      border-radius: 4px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    `;
+    explorerBtn.onclick = () => {
+      alert(`[Windows File Explorer]\nVault path: C:\\meow-vault\nQuick Access: Pinned via windows/quick_access/pin_vaultr_quick_access.ps1\nSaved Searches installed: Vaultr_New_24h.search-ms, Vaultr_Books_and_Docs.search-ms`);
+    };
+    header.appendChild(explorerBtn);
 
     return header;
   }
@@ -263,10 +314,11 @@ export class KoofrBrowserView {
       display: flex;
       flex-direction: column;
       gap: 4px;
+      overflow-y: auto;
     `;
 
     const shelfTitle = document.createElement('div');
-    shelfTitle.textContent = 'DYNAMIC SHELVES';
+    shelfTitle.textContent = 'SYSTEM SHELVES';
     shelfTitle.style.cssText = 'font-size: 0.65rem; font-weight: 700; color: #718096; letter-spacing: 0.05em; padding: 4px 8px;';
     sidebar.appendChild(shelfTitle);
 
@@ -300,6 +352,42 @@ export class KoofrBrowserView {
         this.render();
       };
       sidebar.appendChild(btn);
+    }
+
+    // Dynamic Virtual Folders section (Extracted dynamically from sidecars!)
+    const virtualFolders = this.getUniqueVirtualFolders();
+    if (virtualFolders.length > 0) {
+      const vfTitle = document.createElement('div');
+      vfTitle.textContent = 'DYNAMIC / VIRTUAL FOLDERS';
+      vfTitle.style.cssText = 'font-size: 0.65rem; font-weight: 700; color: #b794f4; letter-spacing: 0.05em; padding: 12px 8px 4px;';
+      sidebar.appendChild(vfTitle);
+
+      for (const vf of virtualFolders) {
+        const vfBtn = document.createElement('button');
+        const isSelected = this.selectedShelfId === `vf:${vf}`;
+        vfBtn.style.cssText = `
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          width: 100%;
+          padding: 6px 10px;
+          background: ${isSelected ? '#44337a' : 'transparent'};
+          border: none;
+          border-radius: 6px;
+          color: ${isSelected ? '#e9d8fd' : '#cbd5e0'};
+          font-size: 0.82rem;
+          cursor: pointer;
+          text-align: left;
+        `;
+        const count = this.items.filter(i => (i.virtual_folders || []).includes(vf)).length;
+        vfBtn.innerHTML = `<span>📁 ${vf}</span><span style="font-size: 0.7rem; color: #a0aec0; background: #1a202c; padding: 2px 6px; border-radius: 999px;">${count}</span>`;
+        vfBtn.onclick = () => {
+          this.selectedShelfId = `vf:${vf}`;
+          this.activeTab = 'browse';
+          this.render();
+        };
+        sidebar.appendChild(vfBtn);
+      }
     }
 
     // Remotes section
@@ -607,6 +695,10 @@ sidecarPath: ${item.sidecarPath || 'none'}
         if (!matches) return false;
       }
 
+      if (this.selectedShelfId.startsWith('vf:')) {
+        const targetVf = this.selectedShelfId.slice(3);
+        return (item.virtual_folders || []).includes(targetVf);
+      }
       if (this.selectedShelfId === 'new-24h') {
         const added = item.added_at ? new Date(item.added_at).getTime() : 0;
         return added > 0 && (now - added) < dayMs;
@@ -652,6 +744,18 @@ sidecarPath: ${item.sidecarPath || 'none'}
     });
 
     return filtered;
+  }
+
+  public getUniqueVirtualFolders(): string[] {
+    const set = new Set<string>();
+    for (const item of this.items) {
+      if (item.virtual_folders) {
+        for (const vf of item.virtual_folders) {
+          if (vf.trim()) set.add(vf.trim());
+        }
+      }
+    }
+    return Array.from(set).sort();
   }
 
   private computeShelfCount(shelfId: string): number {

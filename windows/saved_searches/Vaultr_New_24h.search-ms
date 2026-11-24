@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<persistedQuery version="1.0">
+  <viewInfo>
+    <property name="ViewMode" type="uint32">1</property>
+    <property name="IconSize" type="uint32">16</property>
+  </viewInfo>
+  <properties />
+  <query>
+    <kindList>
+      <kind name="item" />
+    </kindList>
+    <scope>
+      <include path="C:\meow-vault" knownFolder="{FDD39AD0-238F-46AF-ADB4-6C85480369C7}" />
+    </scope>
+    <conditions>
+      <condition type="leafCondition" property="System.DateModified" operator="gte" value="date:yesterday" />
+    </conditions>
+  </query>
+</persistedQuery>

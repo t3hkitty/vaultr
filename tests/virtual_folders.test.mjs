@@ -89,4 +89,9 @@ test('KoofrBrowserView filters 24h new items dynamically and sorts by Date Added
   // Verify computeShelfCount for downloads-24h
   const dlCount = view.computeShelfCount('downloads-24h');
   assert.equal(dlCount, 1);
+
+  // Verify getUniqueVirtualFolders
+  const uniqueFolders = view.getUniqueVirtualFolders();
+  assert.deepEqual(uniqueFolders, ['Watch Later']);
 });
+
